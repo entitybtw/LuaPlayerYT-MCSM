@@ -4,7 +4,7 @@
 
 1. **Easy Error Screen Customization** - Simple configuration options for error appearance, sound, font, and background image.
 2. **Simplified Build Process** - Uses a `build.sh` script that is easily modifiable and allows adding any necessary compilation commands.
-3. **Minimalist Codebase** - Unnecessary libraries have been removed (currently the mp4 library is cut out) to reduce size and simplify maintenance.
+3. **Minimalist Codebase** - Unnecessary libraries have been removed to reduce size and simplify maintenance.
 4. **Targeted Optimizations** - Performance improvements specifically aimed at working with portable devices.
 5. **Additional Code Comments** - Added explanatory comments to customization settings for easier modification.
 
