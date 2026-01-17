@@ -1,5 +1,7 @@
 # LuaPlayerYT-MCSM
 
+### [russian readme version / русская версия readme](./README_RU.md)
+
 ## Fork Features
 
 1. **Easy Error Screen Customization** - Simple configuration options for error appearance, sound, font, and background image.
