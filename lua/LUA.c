@@ -110,12 +110,12 @@ static int LUA_delay(lua_State *L)
 
 int get_freeRam()
 {
-    void* buf[128];
+    void* buf[65536];
     int i, j;
 
-    for(i = 0; i < 128; i++)
+    for(i = 0; i < 65536; i++)
     {
-        buf[i] = malloc(512 * 1024);
+        buf[i] = malloc(1024);
         if(!buf[i])
             break;
     }
@@ -127,7 +127,7 @@ int get_freeRam()
         free(buf[j]);
     }
 
-    return (result * 512 * 1024);
+    return (result * 1024);
 }
 
 static int LUA_freeRAM(lua_State *L)
