@@ -154,14 +154,16 @@ static int PMP_play(lua_State *L) {
         return 1;
 
     int args = lua_gettop(L);
-    if (args < 1 && args > 4)
-        return luaL_error(L, "PMP.play(path, getPointer, [interruptButton], [subtitlePath]) takes 1, 2, 3 or 4 arguments");
-
+    if (args < 2 || args > 5)
+        return luaL_error(L, "PMP.play(path, getPointer, loop, [subtitlePath], [interruptButton]) takes 2, 3, 4 or 5 arguments");
 
     char *path = (char *)luaL_checkstring(L, 1);
     bool getPointer = lua_toboolean(L, 2);
-    PMP_INTERRUPT_BUTTON = (args >= 3 && !lua_isnil(L, 3)) ? luaL_checkint(L, 3) : 69;
-    char *subtitlepath = (args == 4) ? (char *)luaL_checkstring(L, 4) : NULL;
+    
+    bool loop = (args >= 3 && !lua_isnil(L, 3)) ? lua_toboolean(L, 3) : false;
+    
+    char *subtitlepath = (args >= 4 && !lua_isnil(L, 4)) ? (char *)luaL_checkstring(L, 4) : NULL;
+    PMP_INTERRUPT_BUTTON = (args >= 5 && !lua_isnil(L, 5)) ? luaL_checkint(L, 5) : 69;
 
     if (getPointer) {
         if (LPYTVideoPath) {
@@ -177,15 +179,13 @@ static int PMP_play(lua_State *L) {
         memcpy(LPYTVideoPath, path, 512);
 
         g2dImage *tex = _g2dTexCreate(480, 272, true);
-
         g2dImage **image = pushG2D(L);
-
     }
 
     if (subtitlepath) {
         size_t len = strlen(subtitlepath);
 
-        if (strcmp(subtitlepath + len - 4, ".srt") != 0 || !strcmp(subtitlepath + len - 4, ".ass") != 0)
+        if (strcmp(subtitlepath + len - 4, ".srt") != 0 && strcmp(subtitlepath + len - 4, ".ass") != 0)
             return luaL_error(L, "PMP.play() error: you're trying to load non-srt/ass subtitle file");
 
         parseSubs(subtitlepath);
@@ -195,10 +195,35 @@ static int PMP_play(lua_State *L) {
     if (rez != 0)
         return luaL_error(L, "PMP.play() error: file \"%s\" doesn't exist or some internal error", path);
 
-    while (pmp_isplaying()) {
+    if (loop) {
+        int exit_loop = 0;
+        while (!exit_loop) {
+            while (pmp_isplaying()) {
+                if (PMP_INTERRUPT_BUTTON != 69) {
+                    SceCtrlData pad;
+                    sceCtrlPeekBufferPositive(&pad, 1);
+                    if (pad.Buttons & PMP_INTERRUPT_BUTTON) {
+                        exit_loop = 1;
+                        break;
+                    }
+                }
+                sceKernelDelayThread(10000);
+            }
+            
+            if (!exit_loop) {
+                pmp_stop();
+                char *rez = pmp_play(path, 1, GU_PSM_8888);
+                if (rez != 0)
+                    break;
+            }
+        }
+        pmp_stop();
+    } else {
+        while (pmp_isplaying()) {
+            sceKernelDelayThread(10000);
+        }
+        pmp_stop();
     }
-
-    pmp_stop();
 
     return 1;
 }
