@@ -960,7 +960,6 @@ static int G2D_drawCube(lua_State *L) {
 }
 
 static int G2D_drawCircleOnTex(lua_State *L) {
-
     g2dImage *tex = *toG2D(L, 1); 
     int x = luaL_checknumber(L, 2);
     int y = luaL_checknumber(L, 3);
@@ -974,7 +973,7 @@ static int G2D_drawCircleOnTex(lua_State *L) {
 static int G2D_setCamera(lua_State *L) {
     int args = lua_gettop(L);
     if (args != 1 && args != 3)
-        return luaL_error(L, "G2D_setCamera(use, [x], [y]) takes 1 or 3 arguments");
+        return luaL_error(L, "screen.setCamera(use, [x], [y]) takes 1 or 3 arguments");
 
     g2dSetUseCamera(lua_toboolean(L, 1) != 0);
 
