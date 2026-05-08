@@ -191,6 +191,8 @@ static int PMP_play(lua_State *L) {
         parseSubs(subtitlepath);
     }
 
+    lua_gc(L, LUA_GCCOLLECT, 0L);
+    
     char *rez = pmp_play(path, 1, GU_PSM_8888);
     if (rez != 0)
         return luaL_error(L, "PMP.play() error: file \"%s\" doesn't exist or some internal error", path);
