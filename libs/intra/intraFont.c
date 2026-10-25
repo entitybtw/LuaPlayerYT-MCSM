@@ -21,7 +21,7 @@
 #include <math.h>
 
 #include "intraFont.h"
-#include "../vfpu_math.h"
+#include "pspmath.h"
 
 static unsigned int __attribute__((aligned(16))) clut[16];
 
@@ -1346,7 +1346,162 @@ float intraFontMeasureTextUCS2Ex(intraFont *font, const cccUCS2 *text, int lengt
 }
 
 int intraFontTextHeight(intraFont *font) {
-    return ceil((font->glyph[1].height) * font->size);
+    if (!font) return 0;
+
+    // Высота букв (не высота строки). Это смещение базовой линии текста:
+    // движок печатает буквы так, что их верх находится на высоте
+    // (y + textHeight - верх глифа) от места, где напечатан текст
+    // (см. intraFontPrintColumnUCS2Ex и INTRAFONT_print в graphics.c,
+    // который печатает на y + intraFontTextHeight(font)).
+    //
+    // Для расстояния между строками есть другая функция:
+    // intraFontTextLineHeight().
+    return (int)ceil((font->glyph[1].height) * font->size);
+}
+
+// The distance between two lines of the text.
+//
+// This is the height of the line of the font (advancey * size / 4), the
+// same one that the engine uses when it breaks the text into lines (see
+// intraFontPrintColumnUCS2Ex). It is bigger than the height of the
+// letters, because the line has the space for the descenders (the letters
+// that go below the line) and for the space between the lines.
+int intraFontTextLineHeight(intraFont *font) {
+    if (!font) return 0;
+
+    float height = font->advancey * font->size / 4.0f;
+    if (height < 1.0f) height = 1.0f;
+
+    return (int)ceil(height);
+}
+
+// The box of the visible pixels of the text (the ink of the letters),
+// relative to the place of the text.
+//
+// The engine draws a letter this way (intraFontPrintColumnUCS2Ex):
+//   yu = y + textHeight - top of the glyph * scale
+//   yd = yu + height of the glyph * scale
+// (the text is printed at y + intraFontTextHeight(font), see
+// INTRAFONT_print in graphics.c).
+//
+// The result is returned in the two numbers: the offset of the top of the
+// ink from the place of the text and the height of the ink.
+void intraFontTextInkBox(intraFont *font, int *top, int *height) {
+    if (top) *top = 0;
+    if (height) *height = 0;
+    if (!font) return;
+
+    float scale = font->size;
+
+    // The base of the text (the place of the text + the height of the
+    // letters).
+    float base = (float)intraFontTextHeight(font);
+
+    float inkTop = 0, inkBottom = 0;
+    int found = 0;
+
+    for (int i = 0; i < font->n_chars; i++) {
+        const Glyph *glyph = &font->glyph[i];
+        if (glyph->height == 0 || glyph->width == 0) continue;
+
+        float yu = base - glyph->top * scale;
+        float yd = yu + glyph->height * scale;
+
+        if (!found || yu < inkTop) inkTop = yu;
+        if (!found || yd > inkBottom) inkBottom = yd;
+        found = 1;
+    }
+
+    if (!found) {
+        if (top) *top = 0;
+        if (height) *height = (int)ceil(base);
+        return;
+    }
+
+    if (top) *top = (int)floor(inkTop);
+    if (height) *height = (int)ceil(inkBottom - inkTop);
+}
+
+// The box of the visible pixels of a given text (the ink of its letters),
+// relative to the place of the text.
+//
+// It is the same as intraFontTextInkBox, but only the letters of the text
+// are looked at. The box of the whole font is bigger (it has the rare
+// letters with the long descenders), so a text that is centred by it looks
+// too high.
+void intraFontStringInkBox(intraFont *font, const char *text, int *top,
+                           int *height) {
+    if (top) *top = 0;
+    if (height) *height = 0;
+    if (!font || !text) return;
+
+    int length = (int)strlen(text);
+
+#define INK_BUFFER_LENGTH 256
+    cccUCS2 buffer[INK_BUFFER_LENGTH];
+    cccUCS2 *ucs2_text = buffer;
+    if (length > INK_BUFFER_LENGTH) {
+        ucs2_text = (cccUCS2 *)malloc(length * sizeof(cccUCS2));
+        if (!ucs2_text) {
+            intraFontTextInkBox(font, top, height);
+            return;
+        }
+    }
+
+    length = cccCodetoUCS2(ucs2_text, length, (cccCode *)text,
+                           font->options / 0x00010000);
+
+    float scale = font->size;
+    float base = (float)intraFontTextHeight(font);
+
+    float inkTop = 0, inkBottom = 0;
+    int found = 0;
+
+    for (int i = 0; i < length; i++) {
+        if (ucs2_text[i] == '\n') continue;
+
+        int char_id = intraFontGetID(font, ucs2_text[i]);
+        if (char_id < 0 || char_id >= font->n_chars) continue;
+
+        const Glyph *glyph = &font->glyph[char_id];
+        if (glyph->height == 0 || glyph->width == 0) continue;
+
+        float yu = base - glyph->top * scale;
+        float yd = yu + glyph->height * scale;
+
+        if (!found || yu < inkTop) inkTop = yu;
+        if (!found || yd > inkBottom) inkBottom = yd;
+        found = 1;
+    }
+
+    if (ucs2_text != buffer) free(ucs2_text);
+
+    if (!found) {
+        intraFontTextInkBox(font, top, height);
+        return;
+    }
+
+    if (top) *top = (int)floor(inkTop);
+    if (height) *height = (int)ceil(inkBottom - inkTop);
+}
+
+// The height of the visible pixels of the text (the ink of the letters).
+//
+// It is smaller than the height of the line: the line has the space for
+// the descenders and for the space between the lines, which are empty.
+// The text of a hint is centred on the icon of the button by its ink, so
+// that it looks in the middle of the icon, and not a little lower.
+int intraFontTextInkHeight(intraFont *font) {
+    int top = 0, height = 0;
+    intraFontTextInkBox(font, &top, &height);
+    return height;
+}
+
+// The offset of the top of the ink of the text from the place of the text.
+int intraFontTextInkTop(intraFont *font) {
+    int top = 0, height = 0;
+    intraFontTextInkBox(font, &top, &height);
+    return top;
 }
 
 intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float size) {
@@ -1415,8 +1570,8 @@ intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float si
     font->texYSize = 0;
 
     // Set advance based on actual font metrics
-    font->advancex = (int)face->size->metrics.max_advance >> 6;
-    font->advancey = (int)(face->size->metrics.ascender - face->size->metrics.descender) >> 6;
+    font->advancex = (int)(face->size->metrics.max_advance >> 4);
+    font->advancey = (int)((face->size->metrics.ascender - face->size->metrics.descender) >> 4);
 
     // Character set handling
     font->n_chars = 0x1000;
@@ -1493,7 +1648,7 @@ intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float si
     // Load glyphs with proper mapping
     int loaded_chars = 0;
     int mapped_chars = 0; // Отдельный счетчик для маппинга
-    FT_Int32 load_flags = FT_LOAD_RENDER | FT_LOAD_NO_BITMAP | FT_LOAD_TARGET_NORMAL;
+    FT_Int32 load_flags = FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL;
 
     // Создаем маппинг: char_code -> index в glyph массиве
     for (int range = 0; range < font->charmap_compr_len && mapped_chars < font->n_chars; range++) {
@@ -1536,7 +1691,7 @@ intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float si
             glyph->height = slot->bitmap.rows;
             glyph->top = (short)slot->bitmap_top;
             glyph->left = (short)slot->bitmap_left;
-            glyph->advance = (short)slot->advance.x >> 4;
+            glyph->advance = (short)((slot->advance.x) >> 4);
             glyph->flags = PGF_BMP_H_ROWS | PGF_CACHED;
             //glyph->shadowID = 0;
             glyph->ptr = 0;

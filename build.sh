@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # convert error pic
 rm -f libs/include_res/output_png.c 
 bin2c res/error.png libs/include_res/output_png.c error_data 

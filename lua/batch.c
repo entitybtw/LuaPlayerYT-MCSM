@@ -8,7 +8,11 @@ static int L_addDraw(lua_State *L) {
     if (args != 3 && args != 5 && args != 9)
         return luaL_error(L, "Batch.addDraw(img, x, y, [w, h], [srcx, srcy, srcw, srch]) takes 3, 5 or 9 arguments");
 
-    g2dImage *img = *toG2D(L, 1);
+    g2dImage **p = toG2D(L, 1);
+    g2dImage *img = p ? *p : NULL;
+    // Исключаем добавление nil/освобождённого кадра вместо краша.
+    if (!img)
+        return 0;
     int x = luaL_checkint(L, 2), y = luaL_checkint(L, 3);
     int w = luaL_optint(L, 4, img->w), h = luaL_optint(L, 5, img->h);
     int srcx = luaL_optint(L, 6, 0), srcy = luaL_optint(L, 7, 0);

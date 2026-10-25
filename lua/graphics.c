@@ -268,6 +268,64 @@ static int INTRAFONT_height(lua_State *L) {
     return 1;
 }
 
+static int INTRAFONT_lineHeight(lua_State *L) {
+    if (lua_gettop(L) != 1)
+        return luaL_error(L, "intraFont.lineH(font)");
+
+    intraFont *font = (lua_gettop(L) >= 1) ? getFont(L, 1) : luaFont;
+    if (!font || (font != luaFont && !isFontLoaded(font)))
+        return luaL_error(L, "intraFont.lineH() font not found");
+
+    lua_pushnumber(L, intraFontTextLineHeight(font));
+
+    return 1;
+}
+
+static int INTRAFONT_inkHeight(lua_State *L) {
+    if (lua_gettop(L) != 1)
+        return luaL_error(L, "intraFont.inkH(font)");
+
+    intraFont *font = (lua_gettop(L) >= 1) ? getFont(L, 1) : luaFont;
+    if (!font || (font != luaFont && !isFontLoaded(font)))
+        return luaL_error(L, "intraFont.inkH() font not found");
+
+    lua_pushnumber(L, intraFontTextInkHeight(font));
+
+    return 1;
+}
+
+static int INTRAFONT_inkBox(lua_State *L) {
+    if (lua_gettop(L) != 2)
+        return luaL_error(L, "intraFont.inkBox(font, text) takes 2 arguments");
+
+    intraFont *font = (lua_gettop(L) >= 1) ? getFont(L, 1) : luaFont;
+    if (!font || (font != luaFont && !isFontLoaded(font)))
+        return luaL_error(L, "intraFont.inkBox() font not found");
+
+    const char *text = luaL_checkstring(L, 2);
+
+    int top = 0, height = 0;
+    intraFontStringInkBox(font, text, &top, &height);
+
+    lua_pushnumber(L, top);
+    lua_pushnumber(L, height);
+
+    return 2;
+}
+
+static int INTRAFONT_inkTop(lua_State *L) {
+    if (lua_gettop(L) != 1)
+        return luaL_error(L, "intraFont.inkTop(font)");
+
+    intraFont *font = (lua_gettop(L) >= 1) ? getFont(L, 1) : luaFont;
+    if (!font || (font != luaFont && !isFontLoaded(font)))
+        return luaL_error(L, "intraFont.inkTop() font not found");
+
+    lua_pushnumber(L, intraFontTextInkTop(font));
+
+    return 1;
+}
+
 static int INTRAFONT_setStyle(lua_State *L) {
     int args = lua_gettop(L);
     if (args != 4 && args != 5)
@@ -510,6 +568,10 @@ static const luaL_Reg INTRAFONT_methods[] = {
     {"size",            INTRAFONT_size},
     {"textW",           INTRAFONT_width},
     {"textH",           INTRAFONT_height},
+    {"lineH",          INTRAFONT_lineHeight},
+    {"inkH",           INTRAFONT_inkHeight},
+    {"inkTop",         INTRAFONT_inkTop},
+    {"inkBox",         INTRAFONT_inkBox},
     {"unload",          INTRAFONT_unload},
     {0, 0}
 };
@@ -700,6 +762,17 @@ static int removeLoadedImage(g2dImage *tex) {
     return 0;
 }
 
+// Безопасный вариант toG2D: возвращает NULL вместо luaL_typerror, если
+// аргумент не userdata (nil). Позволяет рисовательным функциям просто
+// пропускать кадр вместо краша всего скрипта.
+static g2dImage *safeImageArg(lua_State *L, int index) {
+    g2dImage **p;
+    if (!lua_isuserdata(L, index))
+        return NULL;
+    p = (g2dImage **)lua_touserdata(L, index);
+    return p ? *p : NULL;
+}
+
 static int G2D_texLoad(lua_State *L) {
     if (lua_gettop(L) != 1)
         return luaL_error(L, "Image.load(path) takes 1 argument");
@@ -739,16 +812,18 @@ static int G2D_texUnload(lua_State *L) {
     if (lua_gettop(L) != 1)
         return luaL_error(L, "Image.unload(texture) takes 1 arguments");
 
-    g2dImage *img = *toG2D(L, 1);
+    g2dImage *img = safeImageArg(L, 1);
     if (!img)
-        return luaL_error(L, "Image.unload() can't get the texture");
+        // Уже освобождённая/невалидная текстура — просто выходим без краша.
+        return 0;
 
     if (removeLoadedImage(img)) {
         printLoadedItems((void **)loadedImages, imageCount, capacity, "Images");
         return 0;
     }
 
-    return luaL_error(L, "Image not found in loaded images");
+    // Текстура не найдена (например, уже выгружена) — не крашим скрипт.
+    return 0;
 }
 
 void G2D_texUnloadAll() {
@@ -787,9 +862,12 @@ static int G2D_getW(lua_State *L) {
     if (lua_gettop(L) != 1)
         return luaL_error(L, "Image.W(texture) takes 1 argument");
 
-    g2dImage *img = *toG2D(L, 1);
-    if (!img || !isImageLoaded(img))
-        return luaL_error(L, "Image.W() can't get the texture");
+    g2dImage *img = safeImageArg(L, 1);
+    if (!img || !isImageLoaded(img)) {
+        // Кадр недоступен (nil/освобождён) — не крашим, а возвращаем 0.
+        lua_pushinteger(L, 0);
+        return 1;
+    }
 
     lua_pushinteger(L, img->w);
 
@@ -800,9 +878,11 @@ static int G2D_getH(lua_State *L) {
     if (lua_gettop(L) != 1)
         return luaL_error(L, "Image.H(texture) takes 1 argument");
 
-    g2dImage *img = *toG2D(L, 1);
-    if (!img || !isImageLoaded(img))
-        return luaL_error(L, "Image.H() can't get the texture");
+    g2dImage *img = safeImageArg(L, 1);
+    if (!img || !isImageLoaded(img)) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
 
     lua_pushinteger(L, img->h);
 
@@ -814,9 +894,11 @@ static int G2D_draw(lua_State *L) {
     if (args < 3 || args > 15 || (args == 4 && luaL_checknumber(L, 4) <= 0))
         return luaL_error(L, "Image.draw(texture, x, y, [width], [height], [color], [srcx], [srcy], [srcw], [srch], [rotation], [alpha], [alMode], [GU_LINEAR], [GU_REPEAT]) takes 3, 5, 6, 10, 11, 12, 13, 14 or 15 arguments");
 
-    g2dImage *img = *toG2D(L, 1);
-    if (!img || !isImageLoaded(img))
-        return luaL_error(L, "Image.draw() can't get the texture");
+    g2dImage *img = safeImageArg(L, 1);
+    if (!img || !isImageLoaded(img)) {
+        // Кадр недоступен (nil/освобождён) — исключаем рисование вместо краша.
+        return 0;
+    }
 
     int x = luaL_checknumber(L, 2), y = luaL_checknumber(L, 3);
     int w = luaL_optnumber(L, 4, img->w), h = luaL_optnumber(L, 5, img->h);
@@ -852,9 +934,11 @@ static int G2D_draweasy(lua_State *L) {
     if (args < 3 || args > 9)
         return luaL_error(L, "Image.draweasy(texture, x, y, [color], [rotation], [alpha], [alMode], [GU_LINEAR], [GU_REPEAT]) takes 3, 4, 5, 6, 7, 8 or 9 arguments");
 
-    g2dImage *img = *toG2D(L, 1);
-    if (!img || !isImageLoaded(img))
-        return luaL_error(L, "Image.draweasy() can't get the texture");
+    g2dImage *img = safeImageArg(L, 1);
+    if (!img || !isImageLoaded(img)) {
+        // Кадр недоступен (nil/освобождён) — исключаем рисование вместо краша.
+        return 0;
+    }
 
     int x = luaL_checknumber(L, 2);
     int y = luaL_checknumber(L, 3);
@@ -960,11 +1044,15 @@ static int G2D_drawCube(lua_State *L) {
 }
 
 static int G2D_drawCircleOnTex(lua_State *L) {
-    g2dImage *tex = *toG2D(L, 1); 
+    g2dImage *tex = safeImageArg(L, 1);
     int x = luaL_checknumber(L, 2);
     int y = luaL_checknumber(L, 3);
     int r = luaL_checknumber(L, 4);
     u32 color = *toColor(L, 5);
+
+    // Исключаем рисование по nil/освобождённой текстуре вместо краша.
+    if (!tex || !isImageLoaded(tex))
+        return 0;
 
     draw_circle(tex, x, y, r, r, color);
     return 0;
@@ -1192,11 +1280,19 @@ static int PMP_play(lua_State *L) {
         pmp_stop();
 
         clear_subtitles();
-        removeLoadedImage(PMP_CUR_FRAME);
+        if (PMP_CUR_FRAME) {
+            removeLoadedImage(PMP_CUR_FRAME);
+            PMP_CUR_FRAME = NULL;
+        }
         if (LPYTVideoPath) {
             free(LPYTVideoPath);
             LPYTVideoPath = NULL;
         }
+        // Сбрасываем флаг активного воспроизведения, т.к. кадр только что
+        // освобождён. Иначе остаётся "протухший" флаг + висячий указатель,
+        // и последующий getFrame/draw работает по освобождённой памяти
+        // (use-after-free -> портит RAM на PSP).
+        LPYTVideoPlay = 0;
         PMP_GOT_SUBS = 0;
         PMP_CURRENT_FRAME = 0;
         PMP_PAUSE = FALSE;
@@ -1215,22 +1311,42 @@ static int PMP_play(lua_State *L) {
 
     PMP_CUR_FRAME = _g2dTexCreate(480, 272, true);
 
-    if (!PMP_CUR_FRAME)
-        return luaL_error(L, "PMP.play() internal error");
+    if (!PMP_CUR_FRAME) {
+        // Не удалось выделить текстуру под кадр (на реальном PSP с 32 МБ RAM
+        // это возможно под нагрузкой, PPSSPP такое скрывает). Возвращаем nil
+        // вместо краша, чтобы видео просто не показалось.
+        lua_pushnil(L);
+        return 1;
+    }
 
     if (subtitlepath) {
         size_t len = strlen(subtitlepath);
 
-        if (strcmp(subtitlepath + len - 4, ".srt") != 0 || !strcmp(subtitlepath + len - 4, ".ass") != 0)
-            return luaL_error(L, "PMP.play() error: you're trying to load non-srt/ass subtitle file");
+        if (len >= 4 && strcmp(subtitlepath + len - 4, ".srt") != 0 && strcmp(subtitlepath + len - 4, ".ass") != 0) {
+            // Неверный формат субтитров — не крашим весь скрипт, а просто
+            // игнорируем субтитры и продолжаем воспроизведение видео.
+            subtitlepath = NULL;
+        }
+    }
 
+    if (subtitlepath) {
         parseSubs(subtitlepath);
         PMP_GOT_SUBS = 1;
     }
 
     if (getPointer) {
-        if (pmp_play(path, 0, GU_PSM_8888) != 0)
-            return luaL_error(L, "PMP.play() error: file \"%s\" doesn't exist or some internal error", path);
+        if (pmp_play(path, 0, GU_PSM_8888) != 0) {
+            // Видео не смогло стартовать (не хватило RAM, отсутствует файл
+            // или внутренняя ошибка декодера). Вместо luaL_error (который
+            // убивал бы весь Lua-скрипт) аккуратно освобождаем ресурс и
+            // возвращаем nil, чтобы вызывающий код просто пропустил рисование.
+            g2dTexFree(&PMP_CUR_FRAME);
+            PMP_CUR_FRAME = NULL;
+            clear_subtitles();
+            PMP_GOT_SUBS = 0;
+            lua_pushnil(L);
+            return 1;
+        }
 
         if (LPYTVideoPath) {
             free(LPYTVideoPath);
@@ -1239,8 +1355,16 @@ static int PMP_play(lua_State *L) {
 
         LPYTVideoPath = (char *)malloc(512);
 
-        if (!LPYTVideoPath)
-            return luaL_error(L, "PMP.play() internal error");
+        if (!LPYTVideoPath) {
+            // Не смогли выделить путь — не крашим скрипт, а возвращаем nil.
+            pmp_stop();
+            g2dTexFree(&PMP_CUR_FRAME);
+            PMP_CUR_FRAME = NULL;
+            clear_subtitles();
+            PMP_GOT_SUBS = 0;
+            lua_pushnil(L);
+            return 1;
+        }
 
         memcpy(LPYTVideoPath, path, 512);
 
@@ -1257,8 +1381,15 @@ static int PMP_play(lua_State *L) {
         return 1;
     }
 
-    if (pmp_play(path, 1, GU_PSM_8888) != 0)
-        return luaL_error(L, "PMP.play() error: file \"%s\" doesn't exist or some internal error", path);
+    if (pmp_play(path, 1, GU_PSM_8888) != 0) {
+        // Блокирующее воспроизведение не смогло стартовать — освобождаем
+        // ресурс и выходим без ошибки, чтобы не убивать скрипт.
+        g2dTexFree(&PMP_CUR_FRAME);
+        clear_subtitles();
+        PMP_GOT_SUBS = 0;
+        lua_pushnil(L);
+        return 1;
+    }
 
     save_to_file("temp_sub_font.pgf", subs_font, size_subs_font);
     SUBTITLE_FONT = intraFontLoad("temp_sub_font.pgf", INTRAFONT_CACHE_LARGE | INTRAFONT_STRING_UTF8);
@@ -1272,7 +1403,7 @@ static int PMP_play(lua_State *L) {
         g2dAdd();
         g2dEnd();
 
-        if (PMP_GOT_SUBS && strcmp(getSubString(), "") != 0)
+        if (PMP_GOT_SUBS && SUBTITLE_FONT && strcmp(getSubString(), "") != 0)
             BackgroundColorText(240, 205 + intraFontTextHeight(SUBTITLE_FONT), SUBTITLE_FONT, getSubString(), 1.0, WHITE, 0xDE000000, INTRAFONT_ALIGN_CENTER, false);
 
 
@@ -1283,10 +1414,15 @@ static int PMP_play(lua_State *L) {
 
     clear_subtitles();
     g2dTexFree(&PMP_CUR_FRAME);
-    intraFontUnload(SUBTITLE_FONT);
+    PMP_CUR_FRAME = NULL;
+    if (SUBTITLE_FONT) intraFontUnload(SUBTITLE_FONT);
+    SUBTITLE_FONT = NULL;
     PMP_GOT_SUBS = 0;
 
-    return 0;
+    // Blocking play отработал успешно — возвращаем true, чтобы вызывающий
+    // код мог отличить успех от фейла (nil) и показать запасной контент.
+    lua_pushboolean(L, 1);
+    return 1;
 }
 
 static int PMP_getFrame(lua_State *L) {
@@ -1298,17 +1434,57 @@ static int PMP_getFrame(lua_State *L) {
                 return luaL_error(L, "PMP.getFrame(pointer) takes 1 argument");
             }
 
+            // Защита от nil/невалидного указателя: если кадр не передан или
+            // уже освобождён, просто возвращаем nil (конец видео), вместо
+            // luaL_typerror внутри toG2D, который убивал бы скрипт.
+            if (lua_isnil(L, 1) || !lua_isuserdata(L, 1)) {
+                pmp_stop();
+                clear_subtitles();
+                // The frame of the video is freed here as well: the caller
+                // has lost the pointer, so nothing else can free it.
+                if (PMP_CUR_FRAME) {
+                    removeLoadedImage(PMP_CUR_FRAME);
+                }
+                PMP_CUR_FRAME = NULL;
+                LPYTVideoPlay = 0;
+                PMP_GOT_SUBS = 0;
+                if (LPYTVideoPath) { free(LPYTVideoPath); LPYTVideoPath = NULL; }
+                lua_pushnil(L);
+                return 1;
+            }
+
             if (!PMP_PAUSE) {
-                g2dImage *tex = *toG2D(L, 1);
-                getFrame(tex);
+                g2dImage **pTex = toG2D(L, 1);
+                g2dImage *tex = pTex ? *pTex : NULL;
+                // Кадр мог быть освобождён (например, повторным PMP.play) —
+                // исключаем рисование по висячему указателю, чтобы не портить RAM.
+                if (tex && isImageLoaded(tex))
+                    getFrame(tex);
             }
             lua_pushboolean(L, TRUE);
         } else if (PMP_LOOP) {
             pmp_stop();
             pmp_play(LPYTVideoPath, 0, GU_PSM_8888);
             lua_pushboolean(L, TRUE);
-        } else if (!PMP_LOOP)
+        } else if (!PMP_LOOP) {
+            // The video is over and it does not loop: the texture of its
+            // frame (480x272 = 1 MB on the 32 MB of the PSP) must be freed
+            // here. Otherwise every video that ends leaves a megabyte of
+            // RAM behind, and after a few videos the game runs out of
+            // memory (the videos stop starting, the sounds fail to load
+            // with INSUFFICIENT_RAM and the game crashes).
+            pmp_stop();
+            clear_subtitles();
+            if (PMP_CUR_FRAME) {
+                removeLoadedImage(PMP_CUR_FRAME);
+            }
+            PMP_CUR_FRAME = NULL;
+            LPYTVideoPlay = 0;
+            PMP_GOT_SUBS = 0;
+            PMP_CURRENT_FRAME = 0;
+            if (LPYTVideoPath) { free(LPYTVideoPath); LPYTVideoPath = NULL; }
             lua_pushnil(L);
+        }
 
         return 1;
     }
@@ -1327,10 +1503,29 @@ static int PMP_stop(lua_State *L) {
 
     if (pmp_isplaying() || LPYTVideoPlay) {
         pmp_stop();
-        g2dImage *tex = *toG2D(L, 1);
 
-        if (removeLoadedImage(tex)) {
+        // Защита от nil/невалидного указателя: если кадр не передан или уже
+        // освобождён, просто сбрасываем состояние вместо краша в toG2D.
+        if (lua_isnil(L, 1) || !lua_isuserdata(L, 1)) {
             clear_subtitles();
+            // The caller has lost the pointer: the frame of the video is
+            // freed here, so it does not stay in the memory for ever.
+            if (PMP_CUR_FRAME) {
+                removeLoadedImage(PMP_CUR_FRAME);
+            }
+            PMP_CUR_FRAME = NULL;
+            LPYTVideoPlay = 0;
+            PMP_GOT_SUBS = 0;
+            if (LPYTVideoPath) { free(LPYTVideoPath); LPYTVideoPath = NULL; }
+            return 0;
+        }
+
+        g2dImage **pTex = toG2D(L, 1);
+        g2dImage *tex = pTex ? *pTex : NULL;
+
+        if (tex && removeLoadedImage(tex)) {
+            clear_subtitles();
+            if (PMP_CUR_FRAME == tex) PMP_CUR_FRAME = NULL;
             LPYTVideoPlay = 0;
             PMP_GOT_SUBS = 0;
             free(LPYTVideoPath);
@@ -1339,7 +1534,13 @@ static int PMP_stop(lua_State *L) {
             return 0;
         }
 
-        return luaL_error(L, "Image not found in loaded images");
+        // Кадр не найден (например, уже освобождён) — не крашим скрипт,
+        // а всё равно сбрасываем состояние воспроизведения.
+        clear_subtitles();
+        LPYTVideoPlay = 0;
+        PMP_GOT_SUBS = 0;
+        if (LPYTVideoPath) { free(LPYTVideoPath); LPYTVideoPath = NULL; }
+        return 0;
     }
 
     return 0;

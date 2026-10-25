@@ -251,6 +251,24 @@ G2D_RGBA((int)(luminance)*G2D_GET_R(color)/255, \
     typedef unsigned int g2dColor;
 
     /**
+     * \enum g2dTex_Format
+     * \brief The format of the data of a texture.
+     *
+     * The indexed formats (T8 and T4) keep the picture as indices of a
+     * palette (a CLUT), so a texture takes four (T8) or eight (T4) times
+     * less memory than a 32-bit one. The palette of the texture is uploaded
+     * to the GE before the texture is drawn.
+     */
+    typedef enum
+    {
+        G2D_TEX_8888 = 0, /**< 32 bits per pixel (the default). */
+        G2D_TEX_T8   = 1, /**< 8 bits per pixel: an index of the palette. */
+        G2D_TEX_T4   = 2, /**< 4 bits per pixel: an index of the palette. */
+        G2D_TEX_5650 = 3, /**< 16 bits per pixel (RGB565 with an alpha). */
+        G2D_TEX_5551 = 4  /**< 16 bits per pixel (RGB555 with one bit of the alpha). */
+    } g2dTex_Format;
+
+    /**
      * \struct g2dImage
      * \brief Image structure.
      */
@@ -264,6 +282,11 @@ G2D_RGBA((int)(luminance)*G2D_GET_R(color)/255, \
         bool swizzled;  /**< Is the texture swizzled ? */
         bool can_blend; /**< Can the texture blend ? */
         g2dColor *data; /**< Pointer to raw data. */
+        int format;     /**< The format of the data (g2dTex_Format). */
+        g2dColor *clut; /**< The palette of an indexed texture (NULL if none). */
+        int clut_size;  /**< The number of the colours of the palette. */
+        size_t data_size; /**< The number of the bytes of the data (it is
+                            * different for the indexed pictures). */
     } g2dImage;
 
 #ifdef USE_BMP
@@ -466,6 +489,7 @@ G2D_RGBA((int)(luminance)*G2D_GET_R(color)/255, \
      * to set it to NULL (passing NULL to a g2dBegin* function is safe).
      */
     void g2dTexFree(g2dImage **tex);
+
 
     /**
      * \brief Loads an image.

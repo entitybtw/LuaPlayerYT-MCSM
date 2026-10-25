@@ -359,6 +359,31 @@ extern "C" {
 
     int intraFontTextHeight(intraFont *font);
 
+    /**
+     * @brief The distance between two lines of the text (the height of the
+     *        line of the font). It is bigger than the height of the letters.
+     */
+    int intraFontTextLineHeight(intraFont *font);
+
+    /**
+     * @brief The height of the visible pixels of the text (the ink of the
+     *        letters). It is smaller than the height of the line.
+     */
+    int intraFontTextInkHeight(intraFont *font);
+
+    /**
+     * @brief The offset of the top of the ink of the text from the place
+     *        of the text (it is usually a small negative number).
+     */
+    int intraFontTextInkTop(intraFont *font);
+
+    /**
+     * @brief The box of the visible pixels of a given text (the ink of its
+     *        letters): the offset of the top of the ink and its height.
+     */
+    void intraFontStringInkBox(intraFont *font, const char *text, int *top,
+                               int *height);
+
     /** @} */
 
 #ifdef __cplusplus

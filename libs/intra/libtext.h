@@ -18,7 +18,7 @@
 
 #include "../../lua/common.h"
 #include <math.h>
-#include "../vfpu_math.h"
+#include "pspmath.h"
 
 #define SCREEN_W        480
 #define SCREEN_H        272

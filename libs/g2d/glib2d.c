@@ -77,15 +77,18 @@ obj_use_tex_linear, obj_use_tex_repeat, obj_use_int;
 static g2dCoord_Mode obj_coord_mode;
 static int obj_colors_count;
 static g2dImage *obj_tex;
+// The palette of the indexed texture that is drawn at the moment (it is
+// uploaded to the GE only when it changes).
+static g2dColor *last_clut = NULL;
 static int obj_camera_x, obj_camera_y;
 static bool obj_use_camera = false;
 
 g2dImage g2d_draw_buffer = { 512, 512, G2D_SCR_W, G2D_SCR_H,
                              (float)G2D_SCR_W / G2D_SCR_H, false, false,
-                             (g2dColor *)FRAMEBUFFER_SIZE },
+                             (g2dColor *)FRAMEBUFFER_SIZE, G2D_TEX_8888, NULL, 0, 0 },
     g2d_disp_buffer = { 512, 512, G2D_SCR_W, G2D_SCR_H,
                         (float)G2D_SCR_W / G2D_SCR_H, false, false,
-                        (g2dColor *)0 };
+                        (g2dColor *)0, G2D_TEX_8888, NULL, 0, 0 };
 
 // * Internal functions *
 
@@ -451,8 +454,51 @@ void g2dEnd() {
         if (obj_use_tex_repeat) sceGuTexWrap(GU_REPEAT, GU_REPEAT);
         else                    sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         // Load texture
-        sceGuTexMode(GU_PSM_8888, 0, 0, obj_tex->swizzled);
-        sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
+        if (obj_tex->format == G2D_TEX_8888) {
+            // A normal texture: the palette of the GE is not used any
+            // more, so it has to be uploaded again the next time.
+            last_clut = NULL;
+            sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+            sceGuTexMode(GU_PSM_8888, 0, 0, obj_tex->swizzled);
+            sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
+        } else if (obj_tex->format == G2D_TEX_5650 || obj_tex->format == G2D_TEX_5551) {
+            // A 16-bit texture: twice less memory than a 32-bit one.
+            // The 16-bit formats of the GE have almost no room for the
+            // alpha (in 5650 there is none at all), so the alpha of the
+            // texture is not used: the picture is blended with the alpha
+            // of the colour of the vertex (the fade of the screens).
+            last_clut = NULL;
+            sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGB);
+            if (obj_tex->format == G2D_TEX_5650) {
+                sceGuTexMode(GU_PSM_5650, 0, 0, obj_tex->swizzled);
+            } else {
+                sceGuTexMode(GU_PSM_5551, 0, 0, obj_tex->swizzled);
+            }
+            sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
+        } else {
+            // An indexed texture: the palette is uploaded to the GE and
+            // the picture stays as the indices of the palette.
+            // The palette of the last drawn texture is kept, so it is
+            // uploaded only when it really changes (the upload of a
+            // palette is not free).
+            sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+            if (obj_tex->clut != NULL && obj_tex->clut_size > 0) {
+                if (last_clut != obj_tex->clut) {
+                    sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
+                    sceGuClutLoad((obj_tex->clut_size + 7) / 8, obj_tex->clut);
+                    last_clut = obj_tex->clut;
+                }
+            }
+            if (obj_tex->format == G2D_TEX_T4) {
+                sceGuTexMode(GU_PSM_T4, 0, 0, obj_tex->swizzled);
+                // The width of the buffer is in pixels (two pixels in one
+                // byte), so it is the same as the width of the texture.
+                sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
+            } else {
+                sceGuTexMode(GU_PSM_T8, 0, 0, obj_tex->swizzled);
+                sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
+            }
+        }
     }
 
     switch (obj_type) {
@@ -868,6 +914,40 @@ void _swizzle(unsigned char *dest, unsigned char *source, int width, int height)
     }
 }
 
+// The textures of the GE are stored in blocks of 8×8 pixels, so the height
+// of the data is rounded up to a multiple of 8 (the extra rows are not
+// drawn, but they have to be there, or the picture is shifted).
+int _g2dTexHeight(int h) {
+    return (h + 7) & ~7;
+}
+
+// Creates a texture with a buffer of the given size. The size of the
+// buffer of the indexed and of the 16-bit pictures is much smaller than the
+// 32-bit one, so the big buffer is never allocated for them (on the 32 MB
+// of the PSP the big buffer would be a hole in the heap of the game, and
+// the memory of it is lost until the heap is freed).
+static g2dImage *_g2dTexCreateSized(int w, int h, bool can_blend, size_t data_size) {
+    g2dImage *tex = malloc(sizeof(g2dImage));
+    if (tex == NULL) return NULL;
+
+    tex->tw = _getNextPower2(w);
+    tex->th = _getNextPower2(h);
+    tex->w = w;
+    tex->h = h;
+    tex->ratio = (float)w / h;
+    tex->swizzled = false;
+    tex->can_blend = can_blend;
+    tex->format = G2D_TEX_8888;
+    tex->clut = NULL;
+    tex->clut_size = 0;
+
+    tex->data_size = data_size;
+    tex->data = calloc(data_size, 1);
+    if (tex->data == NULL) { free(tex); return NULL; }
+
+    return tex;
+}
+
 g2dImage *_g2dTexCreate(int w, int h, bool can_blend) {
     g2dImage *tex = malloc(sizeof(g2dImage));
     if (tex == NULL) return NULL;
@@ -879,10 +959,14 @@ g2dImage *_g2dTexCreate(int w, int h, bool can_blend) {
     tex->ratio = (float)w / h;
     tex->swizzled = false;
     tex->can_blend = can_blend;
+    tex->format = G2D_TEX_8888;
+    tex->clut = NULL;
+    tex->clut_size = 0;
 
-    tex->data = malloc(tex->tw * tex->th * sizeof(g2dColor));
+    tex->data_size = (size_t)tex->tw * tex->th * sizeof(g2dColor);
+    tex->data = malloc(tex->data_size);
     if (tex->data == NULL) { free(tex); return NULL; }
-    memset(tex->data, 0, tex->tw * tex->th * sizeof(g2dColor));
+    memset(tex->data, 0, tex->data_size);
 
     return tex;
 }
@@ -890,6 +974,13 @@ g2dImage *_g2dTexCreate(int w, int h, bool can_blend) {
 
 void g2dTexFree(g2dImage **tex) {
     if (tex == NULL) return;
+    if (*tex == NULL) return;
+    if ((*tex)->clut != NULL) {
+        // The palette of this texture is not in the GE any more, so it has
+        // to be uploaded again the next time it is used.
+        if (last_clut == (*tex)->clut) last_clut = NULL;
+        free((*tex)->clut);
+    }
     free((*tex)->data);
     free((*tex));
     *tex = NULL;
@@ -897,6 +988,155 @@ void g2dTexFree(g2dImage **tex) {
 
 
 #ifdef USE_PNG
+// Loads a PNG with a palette (an indexed picture). The picture is kept as
+// the indices of the palette, so it takes four (T8) or eight (T4) times
+// less memory than a 32-bit one.
+//
+// The PNG is read twice: the first time to get the palette (and to count
+// the colours), the second time to get the indices. The palette of the
+// texture is built in the format of the GE: a 32-bit colour with the
+// alpha in the highest byte.
+g2dImage *_g2dTexLoadPNGIndexed(png_structp png_ptr, png_infop info_ptr,
+                                 png_uint_32 width, png_uint_32 height,
+                                 int bit_depth) {
+    png_colorp palette = NULL;
+    int palette_size = 0;
+    png_get_PLTE(png_ptr, info_ptr, &palette, &palette_size);
+    if (palette == NULL || palette_size <= 0) return NULL;
+
+    png_bytep trans_alpha = NULL;
+    int num_trans = 0;
+    png_get_tRNS(png_ptr, info_ptr, &trans_alpha, &num_trans, NULL);
+
+    int clut_size = palette_size;
+    if (clut_size > 256) clut_size = 256;
+
+    // The GE loads the palette by the blocks of 8 colours (32 bytes), so the
+    // buffer must hold all the blocks of the palette (a palette of 100
+    // colours is 13 blocks, that is 416 bytes, and not 400).
+    int clut_blocks = (clut_size + 7) / 8;
+    // The memory of the GE needs the 16-byte alignment.
+    size_t clut_bytes = (size_t)clut_blocks * 8 * sizeof(g2dColor);
+    g2dColor *clut = (g2dColor *)memalign(16, clut_bytes);
+    if (clut == NULL) return NULL;
+    memset(clut, 0, clut_bytes);
+
+    for (int i = 0; i < clut_size; i++) {
+        int a = 255;
+        if (trans_alpha != NULL && i < num_trans) a = trans_alpha[i];
+        clut[i] = G2D_RGBA(palette[i].red, palette[i].green, palette[i].blue, a);
+    }
+
+    // The 4-bit format needs 16 colours in the palette, the 8-bit one
+    // needs 256 of them.
+    int format = (bit_depth == 4) ? G2D_TEX_T4 : G2D_TEX_T8;
+
+    // The data of an indexed texture is one byte (T8) or one nibble (T4)
+    // per pixel, so it is much smaller than the 32-bit data. The 32-bit
+    // buffer is never allocated for it (on the 32 MB of the PSP the big
+    // buffer would be a hole in the heap of the game).
+    //
+    // The width of the texture is always a power of two, so it is even and
+    // the rows of a 4-bit picture fit exactly into tw/2 bytes.
+    int tw = _getNextPower2((int)width);
+    int th = _getNextPower2((int)height);
+    size_t data_size = (format == G2D_TEX_T4)
+        ? (size_t)tw * th / 2
+        : (size_t)tw * th;
+
+    g2dImage *tex = _g2dTexCreateSized(width, height, true, data_size);
+    if (tex == NULL) { free(clut); return NULL; }
+    tex->format = format;
+    tex->clut = clut;
+    tex->clut_size = clut_size;
+
+    u8 *data = (u8 *)tex->data;
+
+    // The rows of the PNG are read one by one and packed into the texture.
+    // libpng expands a 4-bit picture to one byte per pixel (png_set_packing),
+    // so both cases are read the same way.
+    png_bytep row = (png_bytep)malloc(width > 0 ? width : 1);
+    if (row == NULL) {
+        // The palette belongs to the texture, g2dTexFree() frees it.
+        g2dTexFree(&tex);
+        return NULL;
+    }
+
+    if (format == G2D_TEX_T8) {
+        for (png_uint_32 y = 0; y < height; y++) {
+            png_read_row(png_ptr, row, NULL);
+            for (png_uint_32 x = 0; x < width; x++) {
+                data[x + y * tex->tw] = row[x] & 0xFF;
+            }
+        }
+    } else {
+        // Two pixels in one byte: the even one in the low nibble.
+        int row_bytes = tex->tw / 2;
+        for (png_uint_32 y = 0; y < height; y++) {
+            png_read_row(png_ptr, row, NULL);
+            for (png_uint_32 x = 0; x < width; x += 2) {
+                u8 v = row[x] & 0x0F;
+                if (x + 1 < width) v |= (row[x + 1] & 0x0F) << 4;
+                data[(x / 2) + y * row_bytes] = v;
+            }
+        }
+    }
+    free(row);
+
+    return tex;
+}
+
+// Loads a picture without an alpha channel (an RGB one) as a 16-bit
+// texture: RGB565 or RGB555 with one bit of the alpha. Such a texture takes
+// twice less memory than a 32-bit one.
+//
+// The colour of the texture is stored in the format of the GE: the lowest
+// byte is the red one, the highest byte is the alpha.
+g2dImage *_g2dTexLoadPNG16(png_structp png_ptr, png_infop info_ptr,
+                            png_uint_32 width, png_uint_32 height,
+                            int format) {
+    // The data of a 16-bit texture is two bytes per pixel. The 32-bit
+    // buffer is never allocated for it (on the 32 MB of the PSP the big
+    // buffer would be a hole in the heap of the game).
+    size_t data_size = (size_t)_getNextPower2((int)width) *
+                       _getNextPower2((int)height) * 2;
+
+    g2dImage *tex = _g2dTexCreateSized(width, height, true, data_size);
+    if (tex == NULL) return NULL;
+
+    tex->format = format;
+
+    u16 *data = (u16 *)tex->data;
+
+    u32 *line = (u32 *)malloc((size_t)width * 4);
+    if (line == NULL) {
+        g2dTexFree(&tex);
+        return NULL;
+    }
+
+    for (png_uint_32 y = 0; y < height; y++) {
+        png_read_row(png_ptr, (u8 *)line, NULL);
+        for (png_uint_32 x = 0; x < width; x++) {
+            u32 c = line[x];
+            int r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF, a = (c >> 24) & 0xFF;
+            u16 v;
+            if (format == G2D_TEX_5650) {
+                // The 16-bit formats of the GE store the blue in the
+                // highest bits of the word and the red in the lowest ones.
+                v = (u16)(((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3));
+            } else {
+                // R5G5B5A1: the highest bit of the word is the alpha.
+                v = (u16)(((b >> 3) << 11) | ((g >> 3) << 6) | (r >> 3) << 1 |
+                           (a >= 128 ? 0x8000 : 0));
+            }
+            data[x + y * tex->tw] = v;
+        }
+    }
+    free(line);
+
+    return tex;
+}
+
 g2dImage *_g2dTexLoadPNG(FILE *fp) {
     png_structp png_ptr;
     png_infop info_ptr;
@@ -914,6 +1154,49 @@ g2dImage *_g2dTexLoadPNG(FILE *fp) {
         &interlace_type, NULL, NULL);
     png_set_strip_16(png_ptr);
     png_set_packing(png_ptr);
+
+    // A picture with a palette is kept as it is (as the indices of the
+    // palette), so it takes much less memory than a 32-bit one.
+    if (color_type == PNG_COLOR_TYPE_PALETTE && (bit_depth == 4 || bit_depth == 8) &&
+        !interlace_type) {
+        g2dImage *tex = _g2dTexLoadPNGIndexed(png_ptr, info_ptr, width, height, bit_depth);
+        if (tex != NULL) {
+            png_read_end(png_ptr, info_ptr);
+            png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+            return tex;
+        }
+        // The indexed picture could not be read: it is read again as a
+        // normal one (the state of the decoder is restored below).
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+        png_set_error_fn(png_ptr, NULL, NULL, NULL);
+        info_ptr = png_create_info_struct(png_ptr);
+        png_init_io(png_ptr, fp);
+        png_set_sig_bytes(png_ptr, sig_read);
+        png_read_info(png_ptr, info_ptr);
+        png_get_IHDR(png_ptr, info_ptr, &width, &height, &bit_depth, &color_type,
+            &interlace_type, NULL, NULL);
+        png_set_strip_16(png_ptr);
+        png_set_packing(png_ptr);
+    }
+
+    // A picture without a transparency is loaded as a 16-bit one (twice
+    // less memory). A picture with a transparency keeps the 32-bit format,
+    // because the 16-bit ones have almost no room for the alpha.
+    if (color_type == PNG_COLOR_TYPE_RGB && !interlace_type) {
+        // The rows of an RGB picture are three bytes per pixel, so they
+        // must be expanded to four bytes (the alpha is added) before they
+        // are read.
+        png_set_filler(png_ptr, 0xff, PNG_FILLER_AFTER);
+        g2dImage *tex = _g2dTexLoadPNG16(png_ptr, info_ptr, width, height,
+                                         G2D_TEX_5650);
+        if (tex != NULL) {
+            png_read_end(png_ptr, info_ptr);
+            png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+            return tex;
+        }
+    }
+
     if (color_type == PNG_COLOR_TYPE_PALETTE)
         png_set_palette_to_rgb(png_ptr);
     if (png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS))
@@ -1492,7 +1775,8 @@ g2dImage *g2dTexLoad(char path[], unsigned char *data, size_t size, g2dTex_Mode 
 
     sceKernelDcacheWritebackAll();
 
-    if ((mode & G2D_SWIZZLE) && (tex->w >= 16 || tex->h >= 16)) {
+    if ((mode & G2D_SWIZZLE) && (tex->w >= 16 || tex->h >= 16) &&
+        tex->format == G2D_TEX_8888) {
         u8 *tmp = malloc(tex->tw * tex->th * PIXEL_SIZE);
         _swizzle(tmp, (u8 *)tex->data, tex->tw * PIXEL_SIZE, tex->th);
         free(tex->data);
