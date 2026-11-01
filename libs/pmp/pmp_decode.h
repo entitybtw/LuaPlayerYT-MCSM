@@ -40,7 +40,9 @@ av decoding in a ring buffer
 
 #define FF_INPUT_BUFFER_PADDING_SIZE 8
 
-#define maximum_frame_buffers 16
+// The decoder takes this many frames, and 4 are given back: 6 frames of 512x272
+// are 6.5 MB (16 frames took 13 MB of the heap).
+#define maximum_frame_buffers 10
 #define number_of_free_video_frame_buffers 4
 
 

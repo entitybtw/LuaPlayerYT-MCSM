@@ -911,7 +911,11 @@ static int G2D_draw(lua_State *L) {
     bool linear = (lua_toboolean(L, 14)) ? true : false;
     bool repeat = (lua_toboolean(L, 15)) ? true : false;
 
-    g2dBeginRects(img);
+    // A rotated sprite needs other vertices, so it is drawn on its own.
+    if (Angle != 0.0f)
+        g2dBeginRects(img);
+    else
+        g2dBatchBegin(img, linear, repeat);
     g2dSetCoordMode(AlMode);
     g2dSetTexLinear(linear);
     g2dSetTexRepeat(repeat);
@@ -924,7 +928,8 @@ static int G2D_draw(lua_State *L) {
         g2dSetColor(color);
     g2dSetAlpha(a);
     g2dAdd();
-    g2dEnd();
+    if (Angle != 0.0f)
+        g2dEnd();
 
     return 0;
 }
@@ -1225,22 +1230,16 @@ static void getFrame(g2dImage *tex) {
         return;
 
     uint32_t *src = (uint32_t *)frame_data;
+    uint16_t *dst = (uint16_t *)tex->data;
 
     int x, y;
     for (y = 0; y < 272; y++) {
-        int orig_y = (y * orig_height) * INVERSE_272;
-        uint32_t *row = src + orig_y * 512;
-
+        uint32_t *row = src + (int)((y * orig_height) * INVERSE_272) * 512;
+        uint16_t *out = dst + y * tex->tw;
         for (x = 0; x < 480; x++) {
-            int orig_x = (x * orig_width) * INVERSE_480;
-            uint32_t original_color = row[orig_x];
-
-            uint8_t r = G2D_GET_R(original_color);
-            uint8_t g = G2D_GET_G(original_color);
-            uint8_t b = G2D_GET_B(original_color);
-
-            uint32_t rgba_color = (r) | (g << 8) | (b << 16) | 0xFF000000;
-            tex->data[x + y * tex->tw] = rgba_color;
+            uint32_t c = row[orig_width == 480 ? x : (int)((x * orig_width) * INVERSE_480)];
+            // The texture is 16-bit: 277 KB instead of 1 MB of memory.
+            out[x] = ((G2D_GET_B(c) >> 3) << 11) | ((G2D_GET_G(c) >> 2) << 5) | (G2D_GET_R(c) >> 3);
         }
     }
 
@@ -1309,7 +1308,7 @@ static int PMP_play(lua_State *L) {
     PMP_INTERRUPT_BUTTON = (args >= 5 && !lua_isnil(L, 5)) ? luaL_checkint(L, 5) : 69;
     PMP_FPS = (args == 6) ? luaL_checknumber(L, 6) : 29.97;
 
-    PMP_CUR_FRAME = _g2dTexCreate(480, 272, true);
+    PMP_CUR_FRAME = g2dTexCreate565(480, 272);
 
     if (!PMP_CUR_FRAME) {
         // Не удалось выделить текстуру под кадр (на реальном PSP с 32 МБ RAM

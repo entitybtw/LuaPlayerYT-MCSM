@@ -21,6 +21,7 @@
 #include <math.h>
 
 #include "intraFont.h"
+void g2dBatchFlush(void);
 #include "pspmath.h"
 
 static unsigned int __attribute__((aligned(16))) clut[16];
@@ -726,6 +727,7 @@ void intraFontShutdown(void) {
 
 void intraFontActivate(intraFont *font, bool linear) {
     if (!font) return;
+    g2dBatchFlush();
     if (!font->texture) return;
 
     sceGuClutMode(GU_PSM_8888, 0, 255, 0);
@@ -1574,7 +1576,8 @@ intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float si
     font->advancey = (int)((face->size->metrics.ascender - face->size->metrics.descender) >> 4);
 
     // Character set handling
-    font->n_chars = 0x1000;
+    // The sum of the ranges below (the glyphs of 4096 chars took 80 KB).
+    font->n_chars = 0x240;
     font->charmap_compr_len = 10; // Увеличили для дополнительных диапазонов
 
     // Allocate texture memory with proper alignment

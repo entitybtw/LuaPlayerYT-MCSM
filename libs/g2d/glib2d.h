@@ -353,6 +353,15 @@ G2D_RGBA((int)(luminance)*G2D_GET_R(color)/255, \
 
     g2dImage *_g2dTexCreate(int w, int h, bool can_blend);
 
+    /** Opens a batch of sprites of one texture, or continues the open one. */
+    void g2dBatchBegin(g2dImage *tex, bool linear, bool repeat);
+
+    /** Draws the open batch. Anything that draws around glib2d calls it first. */
+    void g2dBatchFlush(void);
+
+    /** A 16-bit (5650) texture of the size of the picture, for the video. */
+    g2dImage *g2dTexCreate565(int w, int h);
+
     /**
      * \brief Initializes the library.
      *

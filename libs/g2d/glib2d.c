@@ -77,9 +77,8 @@ obj_use_tex_linear, obj_use_tex_repeat, obj_use_int;
 static g2dCoord_Mode obj_coord_mode;
 static int obj_colors_count;
 static g2dImage *obj_tex;
-// The palette of the indexed texture that is drawn at the moment (it is
-// uploaded to the GE only when it changes).
-static g2dColor *last_clut = NULL;
+// An open batch of sprites of one texture (see g2dBatchBegin).
+static bool batch_open = false, batch_linear = false, batch_repeat = false;
 static int obj_camera_x, obj_camera_y;
 static bool obj_use_camera = false;
 
@@ -150,7 +149,8 @@ void g2dInit() {
     if (init) return;
 
     // Display list allocation
-    list = malloc(512 * 1024);
+    // 256 KB: the batches of the sprites need far fewer commands per frame.
+    list = malloc(256 * 1024);
 
     // Init & setup GU
     sceGuInit();
@@ -202,6 +202,7 @@ void g2dTerm() {
 }
 
 void g2dClear(g2dColor color) {
+    g2dBatchFlush();
     if (!start) _g2dStart();
 
     sceGuClearColor(color);
@@ -212,6 +213,7 @@ void g2dClear(g2dColor color) {
 
 
 void g2dClearZ() {
+    g2dBatchFlush();
     if (!start) _g2dStart();
 
     sceGuClear(GU_DEPTH_BUFFER_BIT | GU_FAST_CLEAR_BIT);
@@ -238,6 +240,7 @@ void _g2dBeginCommon() {
 
 
 void g2dBeginRects(g2dImage *tex) {
+    g2dBatchFlush();
     if (obj_begin) return;
 
     obj_type = RECTS;
@@ -247,6 +250,7 @@ void g2dBeginRects(g2dImage *tex) {
 
 
 void g2dBeginLines(g2dLine_Mode mode) {
+    g2dBatchFlush();
     if (obj_begin) return;
 
     obj_type = LINES;
@@ -257,6 +261,7 @@ void g2dBeginLines(g2dLine_Mode mode) {
 
 
 void g2dBeginQuads(g2dImage *tex) {
+    g2dBatchFlush();
     if (obj_begin) return;
 
     obj_type = QUADS;
@@ -266,6 +271,7 @@ void g2dBeginQuads(g2dImage *tex) {
 
 
 void g2dBeginPoints() {
+    g2dBatchFlush();
     if (obj_begin) return;
 
     obj_type = POINTS;
@@ -433,6 +439,39 @@ void _g2dEndPoints() {
 }
 
 
+// Automatic batching: the sprites of one texture that are drawn one after
+// another become one draw call, with one set of the states of the GE.
+//
+// g2dBatchBegin() opens a batch or continues the open one, and returns with
+// the object of the next sprite ready to be set up. The batch is drawn by
+// g2dBatchFlush(), and everything that can change the picture or the order of
+// drawing flushes it first.
+void g2dBatchFlush() {
+    if (!batch_open) return;
+    batch_open = false;
+    g2dEnd();
+}
+
+
+void g2dBatchBegin(g2dImage *tex, bool linear, bool repeat) {
+    if (batch_open && obj_tex == tex && batch_linear == linear &&
+        batch_repeat == repeat && obj_list_size < 1024) {
+        // The sprites of a batch can have different colours.
+        g2dReset();
+        g2dSetTexLinear(linear);
+        g2dSetTexRepeat(repeat);
+        obj_use_vert_color = true;
+        return;
+    }
+    g2dBeginRects(tex);
+    g2dSetTexLinear(linear);
+    g2dSetTexRepeat(repeat);
+    batch_linear = linear;
+    batch_repeat = repeat;
+    batch_open = true;
+}
+
+
 void g2dEnd() {
     if (!obj_begin || obj_list_size <= 0) {
         obj_begin = false;
@@ -455,9 +494,6 @@ void g2dEnd() {
         else                    sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         // Load texture
         if (obj_tex->format == G2D_TEX_8888) {
-            // A normal texture: the palette of the GE is not used any
-            // more, so it has to be uploaded again the next time.
-            last_clut = NULL;
             sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
             sceGuTexMode(GU_PSM_8888, 0, 0, obj_tex->swizzled);
             sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
@@ -467,7 +503,6 @@ void g2dEnd() {
             // alpha (in 5650 there is none at all), so the alpha of the
             // texture is not used: the picture is blended with the alpha
             // of the colour of the vertex (the fade of the screens).
-            last_clut = NULL;
             sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGB);
             if (obj_tex->format == G2D_TEX_5650) {
                 sceGuTexMode(GU_PSM_5650, 0, 0, obj_tex->swizzled);
@@ -477,17 +512,13 @@ void g2dEnd() {
             sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
         } else {
             // An indexed texture: the palette is uploaded to the GE and
-            // the picture stays as the indices of the palette.
-            // The palette of the last drawn texture is kept, so it is
-            // uploaded only when it really changes (the upload of a
-            // palette is not free).
+            // the picture stays as the indices of the palette. It is always
+            // uploaded: intraFont loads palettes of its own, so the one in
+            // the GE cannot be trusted. The batches keep the uploads rare.
             sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
             if (obj_tex->clut != NULL && obj_tex->clut_size > 0) {
-                if (last_clut != obj_tex->clut) {
-                    sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
-                    sceGuClutLoad((obj_tex->clut_size + 7) / 8, obj_tex->clut);
-                    last_clut = obj_tex->clut;
-                }
+                sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
+                sceGuClutLoad((obj_tex->clut_size + 7) / 8, obj_tex->clut);
             }
             if (obj_tex->format == G2D_TEX_T4) {
                 sceGuTexMode(GU_PSM_T4, 0, 0, obj_tex->swizzled);
@@ -528,6 +559,7 @@ void g2dReset() {
 
 
 void g2dFlip(g2dFlip_Mode mode) {
+    g2dBatchFlush();
     if (scissor) g2dResetScissor();
 
     sceGuFinish();
@@ -948,6 +980,13 @@ static g2dImage *_g2dTexCreateSized(int w, int h, bool can_blend, size_t data_si
     return tex;
 }
 
+g2dImage *g2dTexCreate565(int w, int h) {
+    size_t size = (size_t)_getNextPower2(w) * _g2dTexHeight(h) * 2;
+    g2dImage *tex = _g2dTexCreateSized(w, h, true, size);
+    if (tex != NULL) tex->format = G2D_TEX_5650;
+    return tex;
+}
+
 g2dImage *_g2dTexCreate(int w, int h, bool can_blend) {
     g2dImage *tex = malloc(sizeof(g2dImage));
     if (tex == NULL) return NULL;
@@ -963,7 +1002,9 @@ g2dImage *_g2dTexCreate(int w, int h, bool can_blend) {
     tex->clut = NULL;
     tex->clut_size = 0;
 
-    tex->data_size = (size_t)tex->tw * tex->th * sizeof(g2dColor);
+    // Only the rows of the picture are stored: 480x272 takes 512x272 and not
+    // the 512x512 of its power-of-two size.
+    tex->data_size = (size_t)tex->tw * _g2dTexHeight(h) * sizeof(g2dColor);
     tex->data = malloc(tex->data_size);
     if (tex->data == NULL) { free(tex); return NULL; }
     memset(tex->data, 0, tex->data_size);
@@ -975,10 +1016,8 @@ g2dImage *_g2dTexCreate(int w, int h, bool can_blend) {
 void g2dTexFree(g2dImage **tex) {
     if (tex == NULL) return;
     if (*tex == NULL) return;
+    g2dBatchFlush();
     if ((*tex)->clut != NULL) {
-        // The palette of this texture is not in the GE any more, so it has
-        // to be uploaded again the next time it is used.
-        if (last_clut == (*tex)->clut) last_clut = NULL;
         free((*tex)->clut);
     }
     free((*tex)->data);
@@ -1039,10 +1078,9 @@ g2dImage *_g2dTexLoadPNGIndexed(png_structp png_ptr, png_infop info_ptr,
     // The width of the texture is always a power of two, so it is even and
     // the rows of a 4-bit picture fit exactly into tw/2 bytes.
     int tw = _getNextPower2((int)width);
-    int th = _getNextPower2((int)height);
     size_t data_size = (format == G2D_TEX_T4)
-        ? (size_t)tw * th / 2
-        : (size_t)tw * th;
+        ? (size_t)tw * _g2dTexHeight((int)height) / 2
+        : (size_t)tw * _g2dTexHeight((int)height);
 
     g2dImage *tex = _g2dTexCreateSized(width, height, true, data_size);
     if (tex == NULL) { free(clut); return NULL; }
@@ -1099,7 +1137,7 @@ g2dImage *_g2dTexLoadPNG16(png_structp png_ptr, png_infop info_ptr,
     // buffer is never allocated for it (on the 32 MB of the PSP the big
     // buffer would be a hole in the heap of the game).
     size_t data_size = (size_t)_getNextPower2((int)width) *
-                       _getNextPower2((int)height) * 2;
+                       _g2dTexHeight((int)height) * 2;
 
     g2dImage *tex = _g2dTexCreateSized(width, height, true, data_size);
     if (tex == NULL) return NULL;
@@ -1775,7 +1813,8 @@ g2dImage *g2dTexLoad(char path[], unsigned char *data, size_t size, g2dTex_Mode 
 
     sceKernelDcacheWritebackAll();
 
-    if ((mode & G2D_SWIZZLE) && (tex->w >= 16 || tex->h >= 16) &&
+    // The textures keep only the rows of the picture, swizzling needs them all.
+    if ((mode & G2D_SWIZZLE) && tex->h == tex->th && (tex->w >= 16 || tex->h >= 16) &&
         tex->format == G2D_TEX_8888) {
         u8 *tmp = malloc(tex->tw * tex->th * PIXEL_SIZE);
         _swizzle(tmp, (u8 *)tex->data, tex->tw * PIXEL_SIZE, tex->th);
@@ -1832,6 +1871,7 @@ void g2dResetScissor() {
 
 
 void g2dSetScissor(int x, int y, int w, int h) {
+    g2dBatchFlush();
     sceGuScissor(x, y, w, h);
     scissor = true;
 }
