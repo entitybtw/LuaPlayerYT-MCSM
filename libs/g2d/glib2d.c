@@ -64,6 +64,8 @@ typedef struct
 // * Main vars *
 static int *list;
 static bool init = false, start = false, zclear = true, scissor = false;
+// Called when a frame has been drawn by the GE (the buffers it read are free).
+static void (*frame_end_hook)(void) = NULL;
 static Transform transform_stack[TRANSFORM_STACK_MAX];
 static int transform_stack_size;
 static float global_scale = 1.f;
@@ -595,6 +597,17 @@ void g2dFlip(g2dFlip_Mode mode) {
     g2d_draw_buffer.data = vabsptr(sceGuSwapBuffers());
 
     start = false;
+    if (frame_end_hook) frame_end_hook();
+}
+
+
+bool g2dFrameOpen() {
+    return start;
+}
+
+
+void g2dOnFrameEnd(void (*fn)(void)) {
+    frame_end_hook = fn;
 }
 
 

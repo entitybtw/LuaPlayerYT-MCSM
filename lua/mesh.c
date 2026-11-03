@@ -200,15 +200,32 @@ static int MESH_new(lua_State *L) {
     return pushMesh(L, m);
 }
 
+// A mesh unloaded while a frame is open may still be read by the GE when the
+// frame is drawn: it is freed after g2dFlip, which waits for the GE.
+static Mesh **pending = NULL;
+static int pending_count = 0, pending_size = 0;
+
+static void freePending(void) {
+    for (int i = 0; i < pending_count; i++) freeMesh(pending[i]);
+    pending_count = 0;
+}
+
 static int MESH_unload(lua_State *L) {
     Mesh **m = (Mesh **)luaL_checkudata(L, 1, "Mesh");
-    if (*m) {
-        // The frame that is being drawn may still read the buffers.
-        g2dBatchFlush();
-        sceGuSync(0, 0);
+    if (!*m) return 0;
+    if (g2dFrameOpen()) {
+        if (pending_count == pending_size) {
+            int size = pending_size ? pending_size * 2 : 8;
+            Mesh **grown = (Mesh **)realloc(pending, size * sizeof(Mesh *));
+            if (!grown) return luaL_error(L, "Mesh.unload: no memory");
+            pending = grown;
+            pending_size = size;
+        }
+        pending[pending_count++] = *m;
+    } else {
         freeMesh(*m);
-        *m = NULL;
     }
+    *m = NULL;
     return 0;
 }
 
@@ -383,6 +400,7 @@ static const luaL_Reg MESH_methods[] = {
 };
 
 int MESH_init(lua_State *L) {
+    g2dOnFrameEnd(freePending);
     luaL_newmetatable(L, "Mesh");
     lua_pushcfunction(L, MESH_unload);
     lua_setfield(L, -2, "__gc");

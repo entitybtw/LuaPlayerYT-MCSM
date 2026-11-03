@@ -370,6 +370,13 @@ G2D_RGBA((int)(luminance)*G2D_GET_R(color)/255, \
         the texture off. */
     void g2dBindTexture(g2dImage *tex, bool linear, bool repeat);
 
+    /** True while the display list of a frame is open (between the first
+        drawing and g2dFlip): the GE may still read what it was given. */
+    bool g2dFrameOpen(void);
+
+    /** A function called by g2dFlip once the frame has been drawn. */
+    void g2dOnFrameEnd(void (*fn)(void));
+
     /** A 16-bit (5650) texture of the size of the picture, for the video. */
     g2dImage *g2dTexCreate565(int w, int h);
 
