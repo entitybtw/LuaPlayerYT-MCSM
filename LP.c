@@ -132,6 +132,8 @@ int GETFREEMEMORY() {
         return (-1024);
 }
 
+int MESH_init(lua_State *L);
+
 void initEngine(lua_State *L) {
     //ASYNC_init(L);
     AUDIO_init(L);
@@ -145,6 +147,7 @@ void initEngine(lua_State *L) {
     PMP_init(L);
     SYSTEM_init(L);
     TIMER_init(L);
+    MESH_init(L);
     USB_init(L);
     VFPU_init(L);
 }

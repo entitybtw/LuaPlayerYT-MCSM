@@ -453,6 +453,22 @@ void g2dBatchFlush() {
 }
 
 
+void g2dBegin3D() {
+    g2dBatchFlush();
+    if (!start) _g2dStart();
+}
+
+
+void g2dEnd3D() {
+    sceGuDisable(GU_LIGHTING);
+    sceGuDisable(GU_FOG);
+    sceGuDisable(GU_CULL_FACE);
+    sceGuDisable(GU_CLIP_PLANES);
+    sceGuDisable(GU_DEPTH_TEST);
+    sceGuDepthFunc(GU_LEQUAL);
+}
+
+
 void g2dBatchBegin(g2dImage *tex, bool linear, bool repeat) {
     if (batch_open && obj_tex == tex && batch_linear == linear &&
         batch_repeat == repeat && obj_list_size < 1024) {
@@ -472,6 +488,60 @@ void g2dBatchBegin(g2dImage *tex, bool linear, bool repeat) {
 }
 
 
+// Binds a texture to the GE with its format, palette, filter and wrap (NULL:
+// no texture). The sprites and Mesh use it.
+void g2dBindTexture(g2dImage *tex, bool linear, bool repeat) {
+    if (tex == NULL) {
+        sceGuDisable(GU_TEXTURE_2D);
+        return;
+    }
+
+    sceGuEnable(GU_TEXTURE_2D);
+    if (linear) sceGuTexFilter(GU_LINEAR, GU_LINEAR);
+    else        sceGuTexFilter(GU_NEAREST_MIPMAP_NEAREST, GU_NEAREST_MIPMAP_NEAREST);
+    if (repeat) sceGuTexWrap(GU_REPEAT, GU_REPEAT);
+    else        sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+    // Load texture
+    if (tex->format == G2D_TEX_8888) {
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+        sceGuTexMode(GU_PSM_8888, 0, 0, tex->swizzled);
+        sceGuTexImage(0, tex->tw, tex->th, tex->tw, tex->data);
+    } else if (tex->format == G2D_TEX_5650 || tex->format == G2D_TEX_5551) {
+        // A 16-bit texture: twice less memory than a 32-bit one.
+        // The 16-bit formats of the GE have almost no room for the
+        // alpha (in 5650 there is none at all), so the alpha of the
+        // texture is not used: the picture is blended with the alpha
+        // of the colour of the vertex (the fade of the screens).
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGB);
+        if (tex->format == G2D_TEX_5650) {
+            sceGuTexMode(GU_PSM_5650, 0, 0, tex->swizzled);
+        } else {
+            sceGuTexMode(GU_PSM_5551, 0, 0, tex->swizzled);
+        }
+        sceGuTexImage(0, tex->tw, tex->th, tex->tw, tex->data);
+    } else {
+        // An indexed texture: the palette is uploaded to the GE and
+        // the picture stays as the indices of the palette. It is always
+        // uploaded: intraFont loads palettes of its own, so the one in
+        // the GE cannot be trusted. The batches keep the uploads rare.
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+        if (tex->clut != NULL && tex->clut_size > 0) {
+            sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
+            sceGuClutLoad((tex->clut_size + 7) / 8, tex->clut);
+        }
+        if (tex->format == G2D_TEX_T4) {
+            sceGuTexMode(GU_PSM_T4, 0, 0, tex->swizzled);
+            // The width of the buffer is in pixels (two pixels in one
+            // byte), so it is the same as the width of the texture.
+            sceGuTexImage(0, tex->tw, tex->th, tex->tw, tex->data);
+        } else {
+            sceGuTexMode(GU_PSM_T8, 0, 0, tex->swizzled);
+            sceGuTexImage(0, tex->tw, tex->th, tex->tw, tex->data);
+        }
+    }
+}
+
+
 void g2dEnd() {
     if (!obj_begin || obj_list_size <= 0) {
         obj_begin = false;
@@ -485,52 +555,7 @@ void g2dEnd() {
     else                    sceGuDisable(GU_BLEND);
     if (obj_use_vert_color) sceGuColor(WHITE);
     else                    sceGuColor(obj_list[0].color);
-    if (obj_tex == NULL)    sceGuDisable(GU_TEXTURE_2D);
-    else {
-        sceGuEnable(GU_TEXTURE_2D);
-        if (obj_use_tex_linear) sceGuTexFilter(GU_LINEAR, GU_LINEAR);
-        else                    sceGuTexFilter(GU_NEAREST_MIPMAP_NEAREST, GU_NEAREST_MIPMAP_NEAREST);
-        if (obj_use_tex_repeat) sceGuTexWrap(GU_REPEAT, GU_REPEAT);
-        else                    sceGuTexWrap(GU_CLAMP, GU_CLAMP);
-        // Load texture
-        if (obj_tex->format == G2D_TEX_8888) {
-            sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-            sceGuTexMode(GU_PSM_8888, 0, 0, obj_tex->swizzled);
-            sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
-        } else if (obj_tex->format == G2D_TEX_5650 || obj_tex->format == G2D_TEX_5551) {
-            // A 16-bit texture: twice less memory than a 32-bit one.
-            // The 16-bit formats of the GE have almost no room for the
-            // alpha (in 5650 there is none at all), so the alpha of the
-            // texture is not used: the picture is blended with the alpha
-            // of the colour of the vertex (the fade of the screens).
-            sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGB);
-            if (obj_tex->format == G2D_TEX_5650) {
-                sceGuTexMode(GU_PSM_5650, 0, 0, obj_tex->swizzled);
-            } else {
-                sceGuTexMode(GU_PSM_5551, 0, 0, obj_tex->swizzled);
-            }
-            sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
-        } else {
-            // An indexed texture: the palette is uploaded to the GE and
-            // the picture stays as the indices of the palette. It is always
-            // uploaded: intraFont loads palettes of its own, so the one in
-            // the GE cannot be trusted. The batches keep the uploads rare.
-            sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-            if (obj_tex->clut != NULL && obj_tex->clut_size > 0) {
-                sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
-                sceGuClutLoad((obj_tex->clut_size + 7) / 8, obj_tex->clut);
-            }
-            if (obj_tex->format == G2D_TEX_T4) {
-                sceGuTexMode(GU_PSM_T4, 0, 0, obj_tex->swizzled);
-                // The width of the buffer is in pixels (two pixels in one
-                // byte), so it is the same as the width of the texture.
-                sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
-            } else {
-                sceGuTexMode(GU_PSM_T8, 0, 0, obj_tex->swizzled);
-                sceGuTexImage(0, obj_tex->tw, obj_tex->th, obj_tex->tw, obj_tex->data);
-            }
-        }
-    }
+    g2dBindTexture(obj_tex, obj_use_tex_linear, obj_use_tex_repeat);
 
     switch (obj_type) {
     case RECTS:  _g2dEndRects();  break;

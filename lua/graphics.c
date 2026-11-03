@@ -858,6 +858,13 @@ static int isImageLoaded(g2dImage *img) {
     return 0;
 }
 
+// The picture of an argument for the other modules: NULL when it is not a
+// loaded picture.
+g2dImage *GRAPHICS_imageArg(lua_State *L, int index) {
+    g2dImage *img = safeImageArg(L, index);
+    return (img && isImageLoaded(img)) ? img : NULL;
+}
+
 static int G2D_getW(lua_State *L) {
     if (lua_gettop(L) != 1)
         return luaL_error(L, "Image.W(texture) takes 1 argument");

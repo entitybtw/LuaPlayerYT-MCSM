@@ -9,8 +9,42 @@
 3. **Minimalist Codebase** - Unnecessary libraries have been removed to reduce size and simplify maintenance.
 4. **Optimizations** - For example, collect garbage in the pmp_play function, which makes pmp_play more stable
 5. **Additional Code Comments** - Added explanatory comments to customization settings for easier modification.
+6. **3D meshes (`Mesh`)** - Coloured, optionally textured triangles drawn by the GPU in 3D between the 2D sprites, with a camera, depth, fog and face culling. See [3D meshes](#3d-meshes).
 
 **Note:** This fork is specifically created for the [Minecraft: Story Mode PSP](https://github.com/entitybtw/mcsm_portable) port, meaning all engine optimizations are primarily aimed at optimizing this port and ensuring its stable operation on PSP.
+
+## 3D meshes
+
+```lua
+-- a mesh from a .msh file or from Lua tables
+local m = Mesh.load("model.msh")
+local tri = Mesh.new({ {-1, 0, 0, Color.new(255, 0, 0)}, {1, 0, 0}, {0, 1.5, 0} })
+-- vertex: {x, y, z, [color], [u], [v]}; u, v are 0..1 over the picture;
+-- a second table of 1-based indices (3 per triangle) is optional
+
+Mesh.camera({ fov = 60, x = 0, y = 1, z = 6, pitch = -10, yaw = 0, roll = 0,
+              near = 0.5, far = 1000 })        -- looks along -z, angles in degrees
+Mesh.fog(40, 48, Color.new(120, 150, 210))     -- Mesh.fog() turns it off
+Mesh.cull("cw")                                -- "none", "cw" or "ccw"
+
+-- every frame
+screen.clear()
+Image.draw(background, 0, 0)                   -- 2D under the meshes
+Mesh.clearDepth()
+Mesh.draw(m, { x = 0, y = 0, z = 0, yaw = 30, scale = 1,   -- or sx, sy, sz
+               tint = Color.new(255, 255, 255), alpha = 255,
+               texture = img, linear = true, ["repeat"] = false, depth = true })
+Image.draw(hud, 0, 0)                          -- 2D over the meshes
+screen.flip()
+
+Mesh.unload(m)
+```
+
+The colours of the vertices are the material and `tint` is the light on it
+(a texture is multiplied with both). A `.msh` file is little endian:
+`"MSH1"`, u32 vertex count, u32 index count, u32 flags (1: the vertices have
+u, v), the vertices as `[float u, v] u32 colour (ABGR) float x, y, z`, then
+the indices as u16.
 
 ## How to Build?
 

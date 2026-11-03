@@ -359,6 +359,17 @@ G2D_RGBA((int)(luminance)*G2D_GET_R(color)/255, \
     /** Draws the open batch. Anything that draws around glib2d calls it first. */
     void g2dBatchFlush(void);
 
+    /** Draws the open batch and opens the display list of the frame, so 3D
+        geometry can be drawn with sceGum between the sprites. */
+    void g2dBegin3D(void);
+
+    /** Puts back the states that glib2d does not set for every batch. */
+    void g2dEnd3D(void);
+
+    /** Binds a texture to the GE (format, palette, filter, wrap); NULL turns
+        the texture off. */
+    void g2dBindTexture(g2dImage *tex, bool linear, bool repeat);
+
     /** A 16-bit (5650) texture of the size of the picture, for the video. */
     g2dImage *g2dTexCreate565(int w, int h);
 
