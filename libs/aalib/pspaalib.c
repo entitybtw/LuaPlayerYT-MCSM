@@ -258,9 +258,34 @@ int AalibDisable(int channel, int effect) {
     return PSPAALIB_SUCCESS;
 }
 
+// Is a play thread still working on the channel? It holds a hardware channel
+// until it has seen the stop and left its loop (Release in PlayThread).
+static int ChannelHasThread(int channel) {
+    int i;
+    for (i = 0;i < 8;i++) {
+        if (hardwareChannels[i] == channel) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 int AalibUnload(int channel) {
     if ((channel < 1) || (channel > 48)) {
         return PSPAALIB_ERROR_INVALID_CHANNEL;
+    }
+    // A stop only marks the channel: its play thread may still be decoding
+    // the next buffer from the data of the sound (about 23 ms of sound). The
+    // data is freed only when the thread has left, or the thread reads freed
+    // memory (a bus error in aalibplay*). One second at most, so a thread that
+    // never ends cannot hang the game.
+    if (ChannelHasThread(channel)) {
+        int waited = 0;
+        AalibStop(channel);
+        while (ChannelHasThread(channel) && waited < 1000000) {
+            sceKernelDelayThread(1000);
+            waited += 1000;
+        }
     }
     channels[channel].initialized = FALSE;
     if ((PSPAALIB_CHANNEL_WAV_1 <= channel) && (channel <= PSPAALIB_CHANNEL_WAV_32)) {
