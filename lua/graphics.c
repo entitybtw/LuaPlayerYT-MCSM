@@ -808,6 +808,42 @@ static int G2D_createPlaceholder(lua_State *L) {
     return 1;
 }
 
+// Image.fromScreen(): a copy of the shown screen (the buffer of the last
+// screen.flip()) as a 16-bit picture, the format of the frames of the videos
+// (277 KB). The game uses it to keep a picture that lives only in the screen,
+// such as the last frame of a video under a choice, across a menu drawn over
+// it. The VRAM is read through its uncached mirror, so the CPU never sees old
+// lines of its cache.
+static int G2D_fromScreen(lua_State *L) {
+    if (lua_gettop(L) != 0)
+        return luaL_error(L, "Image.fromScreen() takes no arguments");
+
+    g2dImage *img = g2dTexCreate565(G2D_SCR_W, G2D_SCR_H);
+    if (!img)
+        return luaL_error(L, "Image.fromScreen() not enough memory");
+
+    const uint32_t *src = (const uint32_t *)((uintptr_t)g2d_disp_buffer.data | 0x40000000);
+    uint16_t *dst = (uint16_t *)img->data;
+    int x, y;
+    for (y = 0; y < G2D_SCR_H; y++) {
+        const uint32_t *row = src + y * 512;
+        uint16_t *out = dst + y * img->tw;
+        for (x = 0; x < G2D_SCR_W; x++) {
+            uint32_t c = row[x];
+            out[x] = ((G2D_GET_B(c) >> 3) << 11) | ((G2D_GET_G(c) >> 2) << 5) | (G2D_GET_R(c) >> 3);
+        }
+    }
+    sceKernelDcacheWritebackRange(img->data, img->data_size);
+
+    checkCapacity((void ***)&loadedImages, &imageCount, &capacity, imageCount + 1);
+    loadedImages[imageCount++] = img;
+
+    g2dImage **image = pushG2D(L);
+    *image = img;
+
+    return 1;
+}
+
 static int G2D_texUnload(lua_State *L) {
     if (lua_gettop(L) != 1)
         return luaL_error(L, "Image.unload(texture) takes 1 arguments");
@@ -1113,6 +1149,7 @@ static const luaL_Reg GFX_methods2[] = {
     {"unload",       G2D_texUnload},
     {"drawCircleOnTex", G2D_drawCircleOnTex},
     {"createPlaceholder", G2D_createPlaceholder},
+    {"fromScreen",   G2D_fromScreen},
     {0, 0}
 };
 
