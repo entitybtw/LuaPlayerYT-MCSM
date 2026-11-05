@@ -47,6 +47,10 @@ int SetAutoloopAt3(int channel, bool autoloop) {
         return PSPAALIB_ERROR_AT3_UNINITIALIZED_CHANNEL;
     }
     streamsAt3[channel].autoloop = autoloop;
+    // A file with a loop (a smpl chunk) is looped by sceAtrac itself, so its
+    // beginning is played once. Without one the call fails and the stream is
+    // rewound to the start at its end (GetBufferAt3).
+    sceAtracSetLoopNum(streamsAt3[channel].id, autoloop ? -1 : 0);
     return PSPAALIB_SUCCESS;
 }
 

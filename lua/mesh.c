@@ -17,9 +17,15 @@
  *
  *   Mesh.draw(mesh, {x, y, z, pitch, yaw, roll, scale | sx, sy, sz,
  *                    tint = Color, alpha = 0..255, texture = Image,
- *                    linear = false, repeat = false, depth = true})
+ *                    linear = false, repeat = false, depth = true,
+ *                    depthWrite = true, ranges = {first, count, ...}})
  *       The colours of the vertices are the material, the tint is the light
- *       that falls on it; a texture is multiplied with both.
+ *       that falls on it; a texture is multiplied with both. depthWrite = false
+ *       keeps the depth test but leaves the depth as it was: for see-through
+ *       faces, which must not hide what is drawn behind them later.
+ *       ranges draws only these runs of the indices (first: 0-based, both
+ *       multiples of 3), with one set-up of the matrices and the states: the
+ *       visible parts of a big mesh, culled by the caller.
  *
  * A .msh file (little endian): "MSH1", u32 vertex count, u32 index count,
  * u32 flags (1: the vertices have u, v), then the vertices as the GE takes
@@ -289,7 +295,7 @@ static int MESH_draw(lua_State *L) {
 
     u32 tint = 0xFFFFFFFF;
     g2dImage *tex = NULL;
-    bool linear = false, repeat = false, depth = true;
+    bool linear = false, repeat = false, depth = true, depthWrite = true;
     if (o) {
         lua_getfield(L, o, "tint");
         if (lua_isuserdata(L, -1)) tint = *toColor(L, -1);
@@ -305,6 +311,9 @@ static int MESH_draw(lua_State *L) {
         lua_pop(L, 1);
         lua_getfield(L, o, "depth");
         depth = lua_isnil(L, -1) ? true : lua_toboolean(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, o, "depthWrite");
+        depthWrite = lua_isnil(L, -1) ? true : lua_toboolean(L, -1);
         lua_pop(L, 1);
     }
     int alpha = (int)optField(L, o, "alpha", 255);
@@ -352,7 +361,8 @@ static int MESH_draw(lua_State *L) {
     if (depth) {
         sceGuEnable(GU_DEPTH_TEST);
         sceGuDepthFunc(GU_GEQUAL);
-        sceGuDepthMask(GU_FALSE);
+        // GU_TRUE masks the writes off.
+        sceGuDepthMask(depthWrite ? GU_FALSE : GU_TRUE);
     } else {
         sceGuDisable(GU_DEPTH_TEST);
     }
@@ -381,7 +391,24 @@ static int MESH_draw(lua_State *L) {
 
     int type = GU_COLOR_8888 | GU_VERTEX_32BITF | GU_INDEX_16BIT | GU_TRANSFORM_3D;
     if (m->flags & MESH_UV) type |= GU_TEXTURE_32BITF;
-    sceGumDrawArray(GU_TRIANGLES, type, m->icount, m->indices, m->verts);
+    bool ranged = false;
+    if (o) {
+        lua_getfield(L, o, "ranges");
+        if (lua_istable(L, -1)) {
+            ranged = true;
+            int t = lua_gettop(L), n = lua_objlen(L, t);
+            for (int i = 1; i + 1 <= n; i += 2) {
+                lua_rawgeti(L, t, i);
+                lua_rawgeti(L, t, i + 1);
+                int first = lua_tointeger(L, -2), count = lua_tointeger(L, -1);
+                lua_pop(L, 2);
+                if (first < 0 || count <= 0 || first + count > m->icount) continue;
+                sceGumDrawArray(GU_TRIANGLES, type, count - count % 3, m->indices + first, m->verts);
+            }
+        }
+        lua_pop(L, 1);
+    }
+    if (!ranged) sceGumDrawArray(GU_TRIANGLES, type, m->icount, m->indices, m->verts);
 
     g2dEnd3D();
     return 0;

@@ -468,6 +468,7 @@ void g2dEnd3D() {
     sceGuDisable(GU_CLIP_PLANES);
     sceGuDisable(GU_DEPTH_TEST);
     sceGuDepthFunc(GU_LEQUAL);
+    sceGuDepthMask(GU_FALSE);   // the writes on again, as glib2d keeps them
 }
 
 
