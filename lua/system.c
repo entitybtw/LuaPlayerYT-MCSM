@@ -940,8 +940,14 @@ void Utf8ToUni(unsigned short *unicodeStr, char *utf8Str) {
     unicodeStr[j] = L'\0';
 }
 
+// The text the keyboard writes. It must live until the keyboard is closed: it
+// was a local array of createOsk, so the keyboard wrote into the stack of a
+// function that had already returned (garbage or a crash on the PSP).
+static unsigned short osk_outtext[maxLen];
+
 void createOsk(SceUtilityOskData *data, unsigned short *input, unsigned short *desc) {
-    unsigned short outtext[512] = { 0 };
+    unsigned short *outtext = osk_outtext;
+    memset(osk_outtext, 0, sizeof(osk_outtext));
     memset(data, 0, sizeof(SceUtilityOskData));
     data->language = PSP_UTILITY_OSK_LANGUAGE_DEFAULT;
     data->lines = 1;
@@ -1036,13 +1042,19 @@ static int SYSTEM_OSK(lua_State *L) {
     if (bg != NULL)
         g2dTexFree(&bg);
 
-    char *outtext = (char *)memalign(16, data.outtextlength * sizeof(char) + 1);
-    UniToUtf8(outtext, data.outtext);
-
-    lua_pushstring(L, outtext);
+    // A character of the keyboard takes up to 3 bytes in UTF-8. The text is
+    // nil when the player cancelled the keyboard.
+    osk_outtext[maxLen - 1] = 0;
+    char *outtext = (char *)memalign(16, maxLen * 3 + 1);
+    if (outtext && data.result != PSP_UTILITY_OSK_RESULT_CANCELLED) {
+        UniToUtf8(outtext, osk_outtext);
+        lua_pushstring(L, outtext);
+    } else {
+        lua_pushnil(L);
+    }
 
     free(desc);
-    free(outtext);
+    if (outtext) free(outtext);
     free(intext);
 
     return 1;
