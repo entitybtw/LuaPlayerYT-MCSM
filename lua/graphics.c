@@ -730,6 +730,12 @@ static g2dImage **loadedImages = NULL;
 static int imageCount = 0;
 static int capacity = 0;
 
+// The frame of the last video, kept when the video ends: the game draws a choice
+// on it (PMP.takeLastFrame). It lives in the RAM, unlike the screen, which an
+// emulator with a hardware renderer does not write back to its VRAM: there
+// Image.fromScreen gets a frame from long ago.
+static g2dImage *PMP_KEPT_FRAME = NULL;
+
 static int removeLoadedImage(g2dImage *tex) {
     int i, j;
     for (i = 0; i < imageCount; i++) {
@@ -853,6 +859,7 @@ static int G2D_texUnload(lua_State *L) {
         // Уже освобождённая/невалидная текстура — просто выходим без краша.
         return 0;
 
+    if (img == PMP_KEPT_FRAME) PMP_KEPT_FRAME = NULL;
     if (removeLoadedImage(img)) {
         printLoadedItems((void **)loadedImages, imageCount, capacity, "Images");
         return 0;
@@ -1265,6 +1272,20 @@ static void parseSubs(char *path) {
 static char *LPYTVideoPath = NULL;
 static int LPYTVideoPlay = 0;
 static int PMP_LOOP = 0;
+// The video is over and its last frame has been handed out once more.
+static int PMP_LAST_FRAME_DONE = 0;
+
+static void freeLastFrame(void) {
+    if (PMP_KEPT_FRAME) removeLoadedImage(PMP_KEPT_FRAME);
+    PMP_KEPT_FRAME = NULL;
+}
+
+// The video is over: its frame becomes the last frame instead of being freed.
+static void keepCurrentFrame(void) {
+    freeLastFrame();
+    PMP_KEPT_FRAME = PMP_CUR_FRAME;
+    PMP_CUR_FRAME = NULL;
+}
 
 static void getFrame(g2dImage *tex) {
     int orig_width, orig_height;
@@ -1352,6 +1373,7 @@ static int PMP_play(lua_State *L) {
     PMP_INTERRUPT_BUTTON = (args >= 5 && !lua_isnil(L, 5)) ? luaL_checkint(L, 5) : 69;
     PMP_FPS = (args == 6) ? luaL_checknumber(L, 6) : 29.97;
 
+    freeLastFrame();
     PMP_CUR_FRAME = g2dTexCreate565(480, 272);
 
     if (!PMP_CUR_FRAME) {
@@ -1412,6 +1434,7 @@ static int PMP_play(lua_State *L) {
         memcpy(LPYTVideoPath, path, 512);
 
         LPYTVideoPlay = 1;
+        PMP_LAST_FRAME_DONE = 0;
 
         checkCapacity((void ***)&loadedImages, &imageCount, &capacity, imageCount + 1);
         loadedImages[imageCount++] = PMP_CUR_FRAME;
@@ -1510,18 +1533,29 @@ static int PMP_getFrame(lua_State *L) {
             pmp_play(LPYTVideoPath, 0, GU_PSM_8888);
             lua_pushboolean(L, TRUE);
         } else if (!PMP_LOOP) {
+            // The output thread may have shown the last frame after the last
+            // copy of the game: one more round with it, so the video always
+            // ends on its real last frame (the frames live until pmp_stop).
+            if (!PMP_LAST_FRAME_DONE && lua_gettop(L) == 1 && lua_isuserdata(L, 1)) {
+                PMP_LAST_FRAME_DONE = 1;
+                g2dImage **pTex = toG2D(L, 1);
+                g2dImage *tex = pTex ? *pTex : NULL;
+                if (tex && isImageLoaded(tex))
+                    getFrame(tex);
+                lua_pushboolean(L, TRUE);
+                return 1;
+            }
+            PMP_LAST_FRAME_DONE = 0;
             // The video is over and it does not loop: the texture of its
             // frame (480x272 = 1 MB on the 32 MB of the PSP) must be freed
             // here. Otherwise every video that ends leaves a megabyte of
             // RAM behind, and after a few videos the game runs out of
             // memory (the videos stop starting, the sounds fail to load
-            // with INSUFFICIENT_RAM and the game crashes).
+            // with INSUFFICIENT_RAM and the game crashes). It is kept as the
+            // last frame, and freed by the next video at the latest.
             pmp_stop();
             clear_subtitles();
-            if (PMP_CUR_FRAME) {
-                removeLoadedImage(PMP_CUR_FRAME);
-            }
-            PMP_CUR_FRAME = NULL;
+            keepCurrentFrame();
             LPYTVideoPlay = 0;
             PMP_GOT_SUBS = 0;
             PMP_CURRENT_FRAME = 0;
@@ -1565,6 +1599,17 @@ static int PMP_stop(lua_State *L) {
 
         g2dImage **pTex = toG2D(L, 1);
         g2dImage *tex = pTex ? *pTex : NULL;
+
+        // A skipped video (R) ends on a frame as well.
+        if (tex && tex == PMP_CUR_FRAME && isImageLoaded(tex)) {
+            clear_subtitles();
+            keepCurrentFrame();
+            LPYTVideoPlay = 0;
+            PMP_GOT_SUBS = 0;
+            free(LPYTVideoPath);
+            LPYTVideoPath = NULL;
+            return 0;
+        }
 
         if (tex && removeLoadedImage(tex)) {
             clear_subtitles();
@@ -1636,8 +1681,28 @@ static int PMP_seek(lua_State *L) {
     return 0;
 }
 
+// PMP.takeLastFrame(): the frame the last video ended on as an Image of the
+// caller (Image.unload frees it), or nil. PMP.freeLastFrame(): frees it.
+static int PMP_takeLastFrame(lua_State *L) {
+    if (!PMP_KEPT_FRAME) {
+        lua_pushnil(L);
+        return 1;
+    }
+    g2dImage **image = pushG2D(L);
+    *image = PMP_KEPT_FRAME;
+    PMP_KEPT_FRAME = NULL;
+    return 1;
+}
+
+static int PMP_freeLastFrame(lua_State *L) {
+    freeLastFrame();
+    return 0;
+}
+
 static const luaL_Reg PMP_methods[] = {
     {"play",        PMP_play},
+    {"takeLastFrame", PMP_takeLastFrame},
+    {"freeLastFrame", PMP_freeLastFrame},
     {"setVolume",   PMP_setVolume},
     {"getFrame",    PMP_getFrame},
     {"stop",        PMP_stop},
