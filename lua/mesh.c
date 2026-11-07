@@ -8,6 +8,10 @@
  *                                   1-based vertex numbers, 3 per triangle (left
  *                                   out: the vertices are the triangles)
  *   Mesh.unload(mesh)
+ *   Mesh.setTiles(mesh, {{first, count, xmin, xmax, ymin, zmin, zmax}, ...})
+ *       The parts of a big mesh with their boxes, in the units of the mesh, in
+ *       the order of the indices (a copy is kept, the table can go). Mesh.draw
+ *       with cull = true draws only the tiles the camera can see.
  *
  *   Mesh.camera{fov = 60, x, y, z, pitch, yaw, roll, near = 0.5, far = 1000}
  *       The camera looks along -z when its angles are 0. Angles in degrees.
@@ -18,7 +22,8 @@
  *   Mesh.draw(mesh, {x, y, z, pitch, yaw, roll, scale | sx, sy, sz,
  *                    tint = Color, alpha = 0..255, texture = Image,
  *                    linear = false, repeat = false, depth = true,
- *                    depthWrite = true, ranges = {first, count, ...}})
+ *                    depthWrite = true, ranges = {first, count, ...},
+ *                    cull = false})
  *       The colours of the vertices are the material, the tint is the light
  *       that falls on it; a texture is multiplied with both. depthWrite = false
  *       keeps the depth test but leaves the depth as it was: for see-through
@@ -26,6 +31,11 @@
  *       ranges draws only these runs of the indices (first: 0-based, both
  *       multiples of 3), with one set-up of the matrices and the states: the
  *       visible parts of a big mesh, culled by the caller.
+ *       cull = true checks the tiles of Mesh.setTiles against the view and
+ *       draws the neighbouring visible ones in one run; nothing at all is sent
+ *       to the GE when none is in view. It needs a camera and a mesh that are
+ *       not turned or scaled (otherwise the whole mesh is drawn). A tile has
+ *       only its lowest y: it is culled above the view, never below it.
  *
  * A .msh file (little endian): "MSH1", u32 vertex count, u32 index count,
  * u32 flags (1: the vertices have u, v), then the vertices as the GE takes
@@ -47,9 +57,17 @@
 #define MESH_UV 1
 
 typedef struct {
+    int first, count;
+    float xmin, xmax, ymin, zmin, zmax;
+} MeshTile;
+
+typedef struct {
     void *verts;
     u16 *indices;
     int vcount, icount, flags;
+    MeshTile *tiles;
+    int *runs;          // first, count of the visible runs of a draw
+    int tile_count;
 } Mesh;
 
 g2dColor *toColor(lua_State *L, int index);
@@ -62,6 +80,15 @@ static u32 fog_color;
 static int cull_mode = 0;   // 0: none, 1: clockwise faces, 2: counter-clockwise
 
 static const float DEG = 3.14159265f / 180.f;
+
+// The matrices of the camera are made when the camera changes, and sent to the
+// GE once per frame (Mesh.clearDepth), not once per mesh.
+static ScePspFMatrix4 cam_proj, cam_view;
+static bool cam_valid = false, cam_upload = true;
+// How far the view reaches up and sideways for every unit of distance, with a
+// margin; only for a camera that is not turned.
+static float view_up, view_side;
+static bool cam_straight = true;
 
 static int vertexSize(int flags) {
     return ((flags & MESH_UV) ? 8 : 0) + 4 + 12;
@@ -77,6 +104,8 @@ static void freeMesh(Mesh *m) {
     if (!m) return;
     free(m->verts);
     free(m->indices);
+    free(m->tiles);
+    free(m->runs);
     free(m);
 }
 
@@ -245,18 +274,125 @@ static float optField(lua_State *L, int table, const char *name, float def) {
 
 static int MESH_camera(lua_State *L) {
     luaL_checktype(L, 1, LUA_TTABLE);
-    cam_fov = optField(L, 1, "fov", 60);
-    cam_pos.x = optField(L, 1, "x", 0);
-    cam_pos.y = optField(L, 1, "y", 0);
-    cam_pos.z = optField(L, 1, "z", 0);
-    cam_rot.x = optField(L, 1, "pitch", 0) * DEG;
-    cam_rot.y = optField(L, 1, "yaw", 0) * DEG;
-    cam_rot.z = optField(L, 1, "roll", 0) * DEG;
-    cam_near = optField(L, 1, "near", 0.5f);
-    cam_far = optField(L, 1, "far", 1000);
-    if (cam_near <= 0 || cam_far <= cam_near)
+    float fov = optField(L, 1, "fov", 60);
+    ScePspFVector3 pos = { optField(L, 1, "x", 0), optField(L, 1, "y", 0), optField(L, 1, "z", 0) };
+    ScePspFVector3 rot = { optField(L, 1, "pitch", 0) * DEG, optField(L, 1, "yaw", 0) * DEG,
+                           optField(L, 1, "roll", 0) * DEG };
+    float near = optField(L, 1, "near", 0.5f), far = optField(L, 1, "far", 1000);
+    if (near <= 0 || far <= near)
         return luaL_error(L, "Mesh.camera: 0 < near < far");
+
+    if (cam_valid && fov == cam_fov && near == cam_near && far == cam_far &&
+        memcmp(&pos, &cam_pos, sizeof(pos)) == 0 && memcmp(&rot, &cam_rot, sizeof(rot)) == 0)
+        return 0;
+    cam_fov = fov;
+    cam_near = near;
+    cam_far = far;
+    cam_pos = pos;
+    cam_rot = rot;
+    cam_straight = rot.x == 0 && rot.y == 0 && rot.z == 0;
+    view_up = tanf(fov * 0.5f * DEG) * 1.05f;
+    view_side = view_up * 480.f / 272.f;
+    cam_valid = false;
     return 0;
+}
+
+// Makes the matrices of a changed camera. The matrix stack of libgum is the
+// only place that holds them, so nothing else may use it (only this file does).
+static void updateCamera(void) {
+    if (!cam_valid) {
+        sceGumMatrixMode(GU_PROJECTION);
+        sceGumLoadIdentity();
+        sceGumPerspective(cam_fov, 480.f / 272.f, cam_near, cam_far);
+        sceGumStoreMatrix(&cam_proj);
+
+        // The view is the camera undone: its turn backwards, then its place.
+        sceGumMatrixMode(GU_VIEW);
+        sceGumLoadIdentity();
+        sceGumRotateZ(-cam_rot.z);
+        sceGumRotateX(-cam_rot.x);
+        sceGumRotateY(-cam_rot.y);
+        ScePspFVector3 back = { -cam_pos.x, -cam_pos.y, -cam_pos.z };
+        sceGumTranslate(&back);
+        sceGumStoreMatrix(&cam_view);
+
+        cam_valid = true;
+        cam_upload = false;     // sceGumDrawArray sends them, they are dirty
+        return;
+    }
+    if (cam_upload) {
+        sceGumMatrixMode(GU_PROJECTION);
+        sceGumLoadMatrix(&cam_proj);
+        sceGumMatrixMode(GU_VIEW);
+        sceGumLoadMatrix(&cam_view);
+        cam_upload = false;
+    }
+}
+
+static int MESH_setTiles(lua_State *L) {
+    Mesh *m = checkMesh(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    int n = lua_objlen(L, 2);
+    MeshTile *tiles = n ? (MeshTile *)malloc(n * sizeof(MeshTile)) : NULL;
+    int *runs = n ? (int *)malloc(n * 2 * sizeof(int)) : NULL;
+    if (n && (!tiles || !runs)) {
+        free(tiles);
+        free(runs);
+        return luaL_error(L, "Mesh.setTiles: not enough memory");
+    }
+    for (int i = 0; i < n; i++) {
+        lua_rawgeti(L, 2, i + 1);
+        int t = lua_gettop(L);
+        if (!lua_istable(L, t)) {
+            free(tiles);
+            free(runs);
+            return luaL_error(L, "Mesh.setTiles: tile %d is not a table", i + 1);
+        }
+        MeshTile *tile = &tiles[i];
+        tile->first = (int)fieldNumber(L, t, 1, 0);
+        tile->count = (int)fieldNumber(L, t, 2, 0);
+        tile->xmin = fieldNumber(L, t, 3, 0);
+        tile->xmax = fieldNumber(L, t, 4, 0);
+        tile->ymin = fieldNumber(L, t, 5, 0);
+        tile->zmin = fieldNumber(L, t, 6, 0);
+        tile->zmax = fieldNumber(L, t, 7, 0);
+        lua_pop(L, 1);
+        if (tile->first < 0 || tile->count <= 0 || tile->first + tile->count > m->icount) {
+            free(tiles);
+            free(runs);
+            return luaL_error(L, "Mesh.setTiles: tile %d is out of the indices", i + 1);
+        }
+    }
+    free(m->tiles);
+    free(m->runs);
+    m->tiles = tiles;
+    m->runs = runs;
+    m->tile_count = n;
+    return 0;
+}
+
+// Fills m->runs with the runs of the tiles the camera can see when the mesh
+// stands at pos, and returns how many there are.
+static int visibleRuns(Mesh *m, const ScePspFVector3 *pos) {
+    float ax = pos->x - cam_pos.x, ay = pos->y - cam_pos.y, az = pos->z - cam_pos.z;
+    int *runs = m->runs;
+    int n = 0, end = -1;
+    for (int i = 0; i < m->tile_count; i++) {
+        const MeshTile *t = &m->tiles[i];
+        float dfar = -(t->zmin + az), dnear = -(t->zmax + az);
+        if (dfar <= cam_near || dnear >= cam_far) continue;
+        float side = view_side * dfar;
+        if (t->ymin + ay > view_up * dfar || t->xmin + ax > side || t->xmax + ax < -side) continue;
+        if (t->first == end) {
+            runs[n * 2 - 1] += t->count;
+        } else {
+            runs[n * 2] = t->first;
+            runs[n * 2 + 1] = t->count;
+            n++;
+        }
+        end = t->first + t->count;
+    }
+    return n;
 }
 
 static int MESH_fog(lua_State *L) {
@@ -286,6 +422,9 @@ static int MESH_clearDepth(lua_State *L) {
     sceGuClearDepth(0);
     sceGuClear(GU_DEPTH_BUFFER_BIT | GU_FAST_CLEAR_BIT);
     sceGuClearDepth(65535);
+    // A new frame: the matrices of the camera go to the GE once more, whatever
+    // the GE was told since the last frame (a video, a new display list).
+    cam_upload = true;
     return 0;
 }
 
@@ -327,20 +466,23 @@ static int MESH_draw(lua_State *L) {
     float pitch = optField(L, o, "pitch", 0) * DEG, yaw = optField(L, o, "yaw", 0) * DEG,
           roll = optField(L, o, "roll", 0) * DEG;
 
+    // The tiles in view, before any state is sent: a cloud out of view costs
+    // nothing but this.
+    int runs = -1;
+    if (o && m->tile_count && cam_straight && pitch == 0 && yaw == 0 && roll == 0 &&
+        size.x == 1 && size.y == 1 && size.z == 1) {
+        lua_getfield(L, o, "cull");
+        bool cull = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+        if (cull) {
+            runs = visibleRuns(m, &pos);
+            if (runs == 0) return 0;
+        }
+    }
+
     g2dBegin3D();
 
-    sceGumMatrixMode(GU_PROJECTION);
-    sceGumLoadIdentity();
-    sceGumPerspective(cam_fov, 480.f / 272.f, cam_near, cam_far);
-
-    // The view is the camera undone: its turn backwards, then its place.
-    sceGumMatrixMode(GU_VIEW);
-    sceGumLoadIdentity();
-    sceGumRotateZ(-cam_rot.z);
-    sceGumRotateX(-cam_rot.x);
-    sceGumRotateY(-cam_rot.y);
-    ScePspFVector3 back = { -cam_pos.x, -cam_pos.y, -cam_pos.z };
-    sceGumTranslate(&back);
+    updateCamera();
 
     sceGumMatrixMode(GU_MODEL);
     sceGumLoadIdentity();
@@ -392,7 +534,13 @@ static int MESH_draw(lua_State *L) {
     int type = GU_COLOR_8888 | GU_VERTEX_32BITF | GU_INDEX_16BIT | GU_TRANSFORM_3D;
     if (m->flags & MESH_UV) type |= GU_TEXTURE_32BITF;
     bool ranged = false;
-    if (o) {
+    if (runs > 0) {
+        ranged = true;
+        for (int i = 0; i < runs; i++) {
+            int count = m->runs[i * 2 + 1];
+            sceGumDrawArray(GU_TRIANGLES, type, count - count % 3, m->indices + m->runs[i * 2], m->verts);
+        }
+    } else if (o) {
         lua_getfield(L, o, "ranges");
         if (lua_istable(L, -1)) {
             ranged = true;
@@ -418,6 +566,7 @@ static const luaL_Reg MESH_methods[] = {
     {"load",       MESH_load},
     {"new",        MESH_new},
     {"unload",     MESH_unload},
+    {"setTiles",   MESH_setTiles},
     {"camera",     MESH_camera},
     {"fog",        MESH_fog},
     {"cull",       MESH_cull},
