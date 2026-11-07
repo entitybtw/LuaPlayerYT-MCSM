@@ -850,6 +850,120 @@ static int G2D_fromScreen(lua_State *L) {
     return 1;
 }
 
+static int isImageLoaded(g2dImage *img);
+
+// Image.saveThumb(image, path, w, h): a small copy of a 16-bit picture as a file
+// (the picture of a save card): "MTH1", u16 w, u16 h, then w * h 5-6-5 pixels. The
+// picture keeps its proportions: what does not fit is cut, the same above and
+// under it or on both sides. Each pixel is the average of the pixels it covers.
+// Written through a temporary file, so a broken write leaves the old file. Returns
+// true when it is written.
+static int G2D_saveThumb(lua_State *L) {
+    g2dImage *img = safeImageArg(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+    int w = luaL_checkint(L, 3), h = luaL_checkint(L, 4);
+    if (!img || !isImageLoaded(img) || img->format != G2D_TEX_5650 || img->swizzled ||
+        w <= 0 || h <= 0 || w > img->w || h > img->h) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    int cw = img->w, ch = img->w * h / w;
+    if (ch > img->h) {
+        ch = img->h;
+        cw = img->h * w / h;
+    }
+    int ox = (img->w - cw) / 2, oy = (img->h - ch) / 2;
+
+    uint16_t *out = malloc(w * h * 2);
+    if (!out) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    const uint16_t *src = (const uint16_t *)img->data;
+    int x, y, sx, sy;
+    for (y = 0; y < h; y++) {
+        int y0 = oy + y * ch / h, y1 = oy + (y + 1) * ch / h;
+        for (x = 0; x < w; x++) {
+            int x0 = ox + x * cw / w, x1 = ox + (x + 1) * cw / w;
+            unsigned int r = 0, g = 0, b = 0, n = 0;
+            for (sy = y0; sy < y1; sy++) {
+                const uint16_t *row = src + sy * img->tw;
+                for (sx = x0; sx < x1; sx++) {
+                    uint16_t c = row[sx];
+                    r += c & 31;
+                    g += (c >> 5) & 63;
+                    b += c >> 11;
+                    n++;
+                }
+            }
+            out[y * w + x] = (uint16_t)((b / n) << 11 | (g / n) << 5 | (r / n));
+        }
+    }
+
+    char tmp[256];
+    int ok = 0;
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) < (int)sizeof(tmp)) {
+        FILE *f = fopen(tmp, "wb");
+        if (f) {
+            uint16_t size[2] = { (uint16_t)w, (uint16_t)h };
+            ok = fwrite("MTH1", 1, 4, f) == 4 && fwrite(size, 2, 2, f) == 2 &&
+                 fwrite(out, 2, w * h, f) == (size_t)(w * h);
+            if (fclose(f) != 0) ok = 0;
+            if (ok && rename(tmp, path) != 0) {
+                // The memory stick does not rename over a file.
+                remove(path);
+                ok = rename(tmp, path) == 0;
+            }
+            if (!ok) remove(tmp);
+        }
+    }
+    free(out);
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+// Image.loadThumb(path): the picture of Image.saveThumb, or nil when the file is
+// not there or is not whole.
+static int G2D_loadThumb(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        lua_pushnil(L);
+        return 1;
+    }
+    char magic[4];
+    uint16_t size[2];
+    g2dImage *img = NULL;
+    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "MTH1", 4) == 0 && fread(size, 2, 2, f) == 2 &&
+        size[0] > 0 && size[1] > 0 && size[0] <= 512 && size[1] <= 272) {
+        img = g2dTexCreate565(size[0], size[1]);
+        if (img) {
+            int y, whole = 1;
+            for (y = 0; y < size[1] && whole; y++) {
+                uint16_t *row = (uint16_t *)img->data + y * img->tw;
+                whole = fread(row, 2, size[0], f) == size[0];
+            }
+            if (whole) {
+                sceKernelDcacheWritebackRange(img->data, img->data_size);
+            } else {
+                g2dTexFree(&img);
+                img = NULL;
+            }
+        }
+    }
+    fclose(f);
+    if (!img) {
+        lua_pushnil(L);
+        return 1;
+    }
+    checkCapacity((void ***)&loadedImages, &imageCount, &capacity, imageCount + 1);
+    loadedImages[imageCount++] = img;
+    g2dImage **image = pushG2D(L);
+    *image = img;
+    return 1;
+}
+
 static int G2D_texUnload(lua_State *L) {
     if (lua_gettop(L) != 1)
         return luaL_error(L, "Image.unload(texture) takes 1 arguments");
@@ -1157,6 +1271,8 @@ static const luaL_Reg GFX_methods2[] = {
     {"drawCircleOnTex", G2D_drawCircleOnTex},
     {"createPlaceholder", G2D_createPlaceholder},
     {"fromScreen",   G2D_fromScreen},
+    {"saveThumb",    G2D_saveThumb},
+    {"loadThumb",    G2D_loadThumb},
     {0, 0}
 };
 
