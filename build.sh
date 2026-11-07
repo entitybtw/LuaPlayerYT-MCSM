@@ -10,4 +10,4 @@ rm -f libs/include_res/output_pgf.c
 bin2c res/luaFont.pgf libs/include_res/output_pgf.c LUAFont 
 
 # build
-make clean && make
+make clean && make "$@"

@@ -50,5 +50,16 @@ PSP_EBOOT_TITLE = Minecraft: Story Mode Season One
 PSP_EBOOT_ICON = res/logo.png
 PSP_EBOOT_PIC1 = res/bg.png
 
+# EBOOT_dev.prx: the engine to run over psplink. Turn it off with: make DEV_PRX=0
+DEV_PRX ?= 1
+ifeq ($(DEV_PRX),1)
+EXTRA_TARGETS += EBOOT_dev.prx
+endif
+EXTRA_CLEAN += EBOOT_dev.prx
+
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
+
+EBOOT_dev.prx: $(TARGET).prx
+	cp $< $@
+
