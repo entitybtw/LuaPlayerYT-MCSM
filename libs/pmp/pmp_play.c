@@ -236,7 +236,37 @@ int pmp_output_thread(SceSize input_length, void *input)
 			current_buffer = &p->decoder.output_frame_buffers[current_buffer_number];
 		}
 
-		if (pmp_wait(p, p->semaphore_can_get, "pmp_output_thread: sceKernelWaitSema failed on semaphore_can_get") == 0)
+		// The wait for the next decoded frame. When the decoder has finished
+		// and no frame is left, the video is over: without this check the
+		// thread could take the last frame, come back here and wait for a
+		// frame that never comes (the video stood on its last frame until
+		// the player skipped it). The decoder signals its last frame before
+		// it sets `finished`, so once `finished` is seen a last poll tells
+		// for sure whether a frame is still there.
+		int got_frame = 0;
+		while (p->return_request == 0)
+		{
+			SceUInt t = 20000;
+			int result = sceKernelWaitSema(p->semaphore_can_get, 1, &t);
+			if (result == SCE_KERNEL_ERROR_OK)
+			{
+				got_frame = 1;
+				break;
+			}
+			if (result != SCE_KERNEL_ERROR_WAIT_TIMEOUT)
+			{
+				p->return_result  = "pmp_output_thread: sceKernelWaitSema failed on semaphore_can_get";
+				p->return_request = 1;
+				break;
+			}
+			if (p->finished)
+			{
+				if (sceKernelPollSema(p->semaphore_can_get, 1) == SCE_KERNEL_ERROR_OK)
+					got_frame = 1;
+				break;
+			}
+		}
+		if (!got_frame)
 		{
 			break;
 		}
@@ -285,8 +315,11 @@ int pmp_output_thread(SceSize input_length, void *input)
 	printf("exiting output thread: %s\n", p->return_result);
 	
 	sceKernelWaitThreadEnd(p->decode_thread, 0);
-	//pmp_play_waitend(p);
-	pmp_play_close(p);
+	// The video is over, but nothing is closed here: the main thread may be
+	// copying the frame right now, and closing frees the frames and zeroes their
+	// size (a copy caught in the middle became a frame of one colour, which the
+	// choice then kept on the screen). pmp_stop() closes it, on the main thread.
+	p->playing = 0;
 	return(0);
 }
 
