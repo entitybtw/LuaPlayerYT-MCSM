@@ -152,6 +152,161 @@ void initEngine(lua_State *L) {
     VFPU_init(L);
 }
 
+// The crash screen: res/error.png, with the text of the error in its white box.
+#define ERROR_BOX_X 138
+#define ERROR_BOX_Y 56
+#define ERROR_BOX_W 300
+#define ERROR_BOX_H 160
+#define ERROR_PADDING 8
+#define ERROR_LINE_GAP 2
+#define ERROR_MAX_LINES 32
+
+typedef struct
+{
+    const char *start;
+    int letters;
+} ErrorLine;
+
+// Breaks the text into the lines of the box, at a space or a slash when a line has
+// one, so that a long path still fits. Returns how many lines the text needs.
+// The lengths of intraFont are in letters, not in bytes.
+static int layoutError(intraFont *font, const char *text, ErrorLine *lines) {
+    const float width = ERROR_BOX_W - 2 * ERROR_PADDING;
+    int count = 0;
+    const char *p = text;
+
+    while (*p) {
+        while (*p == ' ') p++;
+
+        const char *start = p;
+        const char *lastBreak = NULL;
+        int letters = 0, lettersAtBreak = 0;
+
+        while (*p && *p != '\n') {
+            const char *next = p + 1;
+            while ((*next & 0xC0) == 0x80) next++; // the rest of a UTF-8 letter
+
+            if (intraFontMeasureTextEx(font, start, letters + 1) > width && letters > 0) {
+                if (lastBreak) {
+                    p = lastBreak;
+                    letters = lettersAtBreak;
+                }
+                break;
+            }
+
+            letters++;
+            if (*p == ' ' || *p == '/') {
+                lastBreak = next;
+                lettersAtBreak = letters;
+            }
+            p = next;
+        }
+
+        if (count < ERROR_MAX_LINES) {
+            lines[count].start = start;
+            lines[count].letters = letters;
+        }
+        count++;
+
+        if (*p == '\n') p++;
+    }
+
+    return count;
+}
+
+static int errorLineHeight(intraFont *font) {
+    return intraFontTextLineHeight(font) + ERROR_LINE_GAP;
+}
+
+static int errorLinesFit(intraFont *font, int count) {
+    return count <= ERROR_MAX_LINES && count * errorLineHeight(font) <= ERROR_BOX_H - 2 * ERROR_PADDING;
+}
+
+// minecraft.ttf stands on the pixel grid at the sizes 16 and 8 only. The built-in
+// font is for a crash that left no memory or no font file.
+static intraFont *loadErrorFont(const char *text, ErrorLine *lines, int *count, bool *ownFont) {
+    static const float sizes[] = {16.f, 8.f};
+    unsigned int i;
+
+    *ownFont = TRUE;
+    for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        intraFont *font = intraFontLoadTTF("assets/minecraft.ttf", INTRAFONT_STRING_UTF8, sizes[i]);
+        if (!font) break;
+
+        intraFontSetStyle(font, 1.f, G2D_RGBA(0, 0, 0, 255), 0, 0.f, 0);
+        *count = layoutError(font, text, lines);
+        if (errorLinesFit(font, *count) || i == sizeof(sizes) / sizeof(sizes[0]) - 1)
+            return font;
+
+        intraFontUnload(font);
+    }
+
+    *ownFont = FALSE;
+    intraFontSetStyle(luaFont, 0.8f, G2D_RGBA(0, 0, 0, 255), 0, 0.f, 0);
+    *count = layoutError(luaFont, text, lines);
+    return luaFont;
+}
+
+static void showErrorScreen(lua_State *L, const char *message) {
+    static ErrorLine lines[ERROR_MAX_LINES];
+    bool USB_ACTIVE = FALSE;
+    bool ownFont;
+    int count, i;
+
+    lua_gc(L, LUA_GCCOLLECT, 0); // the crash may be out of memory
+
+    g2dImage *ERR = g2dTexLoad(NULL, error_data, size_error_data, G2D_VOID);
+    intraFont *font = loadErrorFont(message, lines, &count, &ownFont);
+
+    int lineHeight = errorLineHeight(font);
+    int maxLines = (ERROR_BOX_H - 2 * ERROR_PADDING) / lineHeight;
+    if (maxLines > ERROR_MAX_LINES) maxLines = ERROR_MAX_LINES;
+    if (count > maxLines) count = maxLines;
+
+    AalibPlay(PSPAALIB_CHANNEL_WAV_32);
+
+    while (1) {
+        controls_read();
+
+        if (controls_pressed(PSP_CTRL_CROSS))
+            sceKernelExitGame();
+
+        if (controls_pressed(PSP_CTRL_TRIANGLE)) {
+            if (USB_ACTIVE)
+                USB_deactivate();
+            else
+                USB_activate();
+
+            USB_ACTIVE = !USB_ACTIVE;
+        }
+
+        g2dClear(G2D_RGBA(0, 0, 0, 255));
+        g2dResetScissor();
+
+        if (ERR) {
+            g2dBeginRects(ERR);
+            g2dAdd();
+            g2dEnd();
+        } else { // no memory for the picture: the text still needs its box
+            g2dBeginRects(NULL);
+            g2dSetColor(G2D_RGBA(255, 255, 255, 255));
+            g2dSetCoordXY(ERROR_BOX_X, ERROR_BOX_Y);
+            g2dSetScaleWH(ERROR_BOX_W, ERROR_BOX_H);
+            g2dAdd();
+            g2dEnd();
+        }
+
+        intraFontActivate(font, !ownFont); // no smoothing on the pixel font
+        for (i = 0; i < count; i++) {
+            intraFontPrintEx(font, ERROR_BOX_X + ERROR_PADDING,
+                ERROR_BOX_Y + ERROR_PADDING + i * lineHeight + intraFontTextHeight(font),
+                lines[i].start, lines[i].letters);
+        }
+
+        g2dFlip(G2D_VSYNC);
+    }
+}
+
 int main() {
     LPYT_Config config;
 
@@ -177,62 +332,18 @@ int main() {
     fclose(f);
 
     while (1) {
-        if (luaL_loadfile(L, config.main_script) == 0) {
-            if (lua_pcall(L, 0, LUA_MULTRET, 0) != 0) { //error
-                FILE *f = fopen("error_log.txt", "a");
-                fprintf(f, "%s\n", lua_tostring(L, -1));
+        if (luaL_loadfile(L, config.main_script) != 0 || lua_pcall(L, 0, LUA_MULTRET, 0) != 0) { //error
+            const char *message = lua_tostring(L, -1);
+            if (!message) message = "unknown error";
+
+            FILE *f = fopen("error_log.txt", "a");
+            if (f) {
+                fprintf(f, "%s\n", message);
                 fclose(f);
-
-                char error[50];
-                sprintf(error, "%s.", lua_tostring(L, -1));
-
-                bool USB_ACTIVE = FALSE;
-
-                // set font, size, color of the error 
-                //intraFontSetStyle(luaFont, 1.f, BLACK, 0, 0.f, 0); <- original
-                intraFontSetStyle(luaFont, 0.5, WHITE, 0, 0.f, 0);
-                
-                // display error-pic
-
-                //chdir("/");
-                g2dImage *ERR = g2dTexLoad(NULL, error_data, size_error_data, G2D_VOID);
-
-                AalibPlay(PSPAALIB_CHANNEL_WAV_32);
-
-                while (1) {
-                    controls_read();
-
-                    if (controls_pressed(PSP_CTRL_CROSS))
-                        sceKernelExitGame();
-
-                    if (controls_pressed(PSP_CTRL_TRIANGLE)) {
-                        if (USB_ACTIVE)
-                            USB_deactivate();
-                        else
-                            USB_activate();
-
-                        USB_ACTIVE = !USB_ACTIVE;
-                    }
-
-                    g2dClear(G2D_RGBA(255, 255, 255, 255));
-
-                    g2dBeginRects(ERR);
-                    g2dAdd();
-                    g2dEnd();
-
-                    intraFontActivate(luaFont, true);
-                    // print lua font
-                    //intraFontPrintColumn(luaFont,213,94,220,error); <- original
-                    intraFontPrintColumn(luaFont,180,94,220,error);
-
-                    //printf("freeRam: %d\n", get_freeRam());
-                    //intraFontPrintColumn(luaFont,230,94,220,error);
-
-                    g2dFlip(G2D_VSYNC);
-
-                }
-                lua_pop(L, 1);
             }
+
+            showErrorScreen(L, message);
+            lua_pop(L, 1);
         }
     }
     lua_close(L);
