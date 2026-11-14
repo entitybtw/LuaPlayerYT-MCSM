@@ -87,9 +87,3 @@ void pmp_shutdown()
 {
 	PMP_GAME_EXIT = 1;
 }
-
-void pmp_seek(int frame)
-{
-	p.seek_request = 1;
-	p.seek_frame = frame;
-}

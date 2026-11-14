@@ -86,6 +86,8 @@ struct pmp_decode_struct
 
 	unsigned int last_buffer_number;
 	unsigned int current_buffer_number;
+	// The buffer of the last decoded picture, -1 before the first one.
+	int last_picture_buffer;
 	};
 
 

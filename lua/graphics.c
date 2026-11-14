@@ -735,6 +735,9 @@ static int capacity = 0;
 // emulator with a hardware renderer does not write back to its VRAM: there
 // Image.fromScreen gets a frame from long ago.
 static g2dImage *PMP_KEPT_FRAME = NULL;
+// The file the kept frame comes from: only a video of the same file goes on
+// from it (PMP.play with startFrame).
+static char PMP_KEPT_PATH[512] = "";
 
 static int removeLoadedImage(g2dImage *tex) {
     int i, j;
@@ -1394,6 +1397,7 @@ static int PMP_LAST_FRAME_DONE = 0;
 static void freeLastFrame(void) {
     if (PMP_KEPT_FRAME) removeLoadedImage(PMP_KEPT_FRAME);
     PMP_KEPT_FRAME = NULL;
+    PMP_KEPT_PATH[0] = 0;
 }
 
 // The video is over: its frame becomes the last frame instead of being freed.
@@ -1401,6 +1405,10 @@ static void keepCurrentFrame(void) {
     freeLastFrame();
     PMP_KEPT_FRAME = PMP_CUR_FRAME;
     PMP_CUR_FRAME = NULL;
+    if (LPYTVideoPath) {
+        strncpy(PMP_KEPT_PATH, LPYTVideoPath, sizeof(PMP_KEPT_PATH) - 1);
+        PMP_KEPT_PATH[sizeof(PMP_KEPT_PATH) - 1] = 0;
+    }
 }
 
 static void getFrame(g2dImage *tex) {
@@ -1479,18 +1487,34 @@ static int PMP_play(lua_State *L) {
     }
 
     int args = lua_gettop(L);
-    if (args < 1 || args > 6)
-        return luaL_error(L, "PMP.play(path, getPointer, [loop], [subtitlePath], [interruptButton], [FPS]) takes 1, 2, 3, 4, 5 or 6 arguments");
+    if (args < 1 || args > 7)
+        return luaL_error(L, "PMP.play(path, getPointer, [loop], [subtitlePath], [interruptButton], [FPS], [startFrame]) takes 1 to 7 arguments");
 
     char *path = (char *)luaL_checkstring(L, 1);
     bool getPointer = lua_toboolean(L, 2);
     PMP_LOOP = lua_toboolean(L, 3);
     char *subtitlepath = (args >= 4 && !lua_isnil(L, 4)) ? (char *)luaL_checkstring(L, 4) : NULL;
     PMP_INTERRUPT_BUTTON = (args >= 5 && !lua_isnil(L, 5)) ? luaL_checkint(L, 5) : 69;
-    PMP_FPS = (args == 6) ? luaL_checknumber(L, 6) : 29.97;
+    PMP_FPS = (args >= 6 && !lua_isnil(L, 6)) ? luaL_checknumber(L, 6) : 29.97;
+    // The first frame: the video starts there (pmp_play_open reads it once).
+    int startFrame = (args >= 7 && !lua_isnil(L, 7)) ? luaL_checkint(L, 7) : 0;
 
+    // A video that goes on from a frame (the menu video after a stop) shows
+    // the frame it stopped on until its decoder reaches that frame (it runs
+    // from the key frame before it, up to a second): the new frame starts as
+    // a copy of the kept one instead of black. Only a frame of the same file:
+    // the frame of another video (the card of the episode menu before the menu
+    // video) would show that video for a second.
+    g2dImage *newFrame = g2dTexCreate565(480, 272);
+    if (newFrame && startFrame > 0 && PMP_KEPT_FRAME && PMP_KEPT_FRAME->data &&
+        strcmp(PMP_KEPT_PATH, path) == 0 &&
+        PMP_KEPT_FRAME->format == newFrame->format && PMP_KEPT_FRAME->tw == newFrame->tw) {
+        size_t n = newFrame->data_size < PMP_KEPT_FRAME->data_size ? newFrame->data_size : PMP_KEPT_FRAME->data_size;
+        memcpy(newFrame->data, PMP_KEPT_FRAME->data, n);
+        sceKernelDcacheWritebackAll();
+    }
     freeLastFrame();
-    PMP_CUR_FRAME = g2dTexCreate565(480, 272);
+    PMP_CUR_FRAME = newFrame;
 
     if (!PMP_CUR_FRAME) {
         // Не удалось выделить текстуру под кадр (на реальном PSP с 32 МБ RAM
@@ -1516,6 +1540,7 @@ static int PMP_play(lua_State *L) {
     }
 
     if (getPointer) {
+        PMP_START_FRAME = startFrame;
         if (pmp_play(path, 0, GU_PSM_8888) != 0) {
             // Видео не смогло стартовать (не хватило RAM, отсутствует файл
             // или внутренняя ошибка декодера). Вместо luaL_error (который
@@ -1563,6 +1588,7 @@ static int PMP_play(lua_State *L) {
         return 1;
     }
 
+    PMP_START_FRAME = startFrame;
     if (pmp_play(path, 1, GU_PSM_8888) != 0) {
         // Блокирующее воспроизведение не смогло стартовать — освобождаем
         // ресурс и выходим без ошибки, чтобы не убивать скрипт.
@@ -1791,10 +1817,57 @@ static int PMP_pause(lua_State *L) {
     return 0;
 }
 
+// PMP.seek(frame): the video of PMP.play(path, true) goes on from that frame.
+// The two threads of the player share a ring of decoded frames, so the video
+// is opened again at the frame instead of being moved under them: the frame
+// image, the subtitles, the loop and the pause stay. A frame past the end is
+// taken modulo the length. True when the video plays on.
 static int PMP_seek(lua_State *L) {
-    pmp_seek(luaL_checknumber(L, 1));
+    if (lua_gettop(L) != 1)
+        return luaL_error(L, "PMP.seek(frame) takes 1 argument");
+    int frame = luaL_checkint(L, 1);
+    if (!LPYTVideoPlay || !LPYTVideoPath || !PMP_CUR_FRAME) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    int total = PMP_NUMBER_OF_FRAMES;
+    if (frame < 0) frame = 0;
+    if (total > 0) frame %= total;
+    int paused = PMP_PAUSE;
+    pmp_stop();
+    PMP_PAUSE = paused;
+    PMP_START_FRAME = frame;
+    PMP_CURRENT_FRAME = frame;
+    PMP_LAST_FRAME_DONE = 0;
+    // On a failure the next PMP.getFrame finds the video stopped and ends it
+    // as any other video (or starts the loop again).
+    lua_pushboolean(L, pmp_play(LPYTVideoPath, 0, GU_PSM_8888) == 0);
+    return 1;
+}
 
-    return 0;
+// PMP.position(): the number of the frame shown now (0 is the first), or nil
+// when nothing plays. PMP.frameCount(): the frames of the playing video.
+static int PMP_position(lua_State *L) {
+    if (LPYTVideoPlay && pmp_isplaying())
+        lua_pushinteger(L, PMP_SHOWN_FRAME);
+    else
+        lua_pushnil(L);
+    return 1;
+}
+
+// PMP.ready(): true once the video shows a decoded frame of its own (a start
+// in the middle shows nothing new until the decoder reaches that frame).
+static int PMP_ready(lua_State *L) {
+    lua_pushboolean(L, LPYTVideoPlay && pmp_isplaying() && PMP_FRAME_READY);
+    return 1;
+}
+
+static int PMP_frameCount(lua_State *L) {
+    if (LPYTVideoPlay && pmp_isplaying() && PMP_NUMBER_OF_FRAMES > 0)
+        lua_pushinteger(L, PMP_NUMBER_OF_FRAMES);
+    else
+        lua_pushnil(L);
+    return 1;
 }
 
 // PMP.takeLastFrame(): the frame the last video ended on as an Image of the
@@ -1825,7 +1898,10 @@ static const luaL_Reg PMP_methods[] = {
     {"getTimeCode", PMP_getTimeCode},
     {"getSubs",     PMP_getSubs},
     {"pause",       PMP_pause},
-    //{"seek",        PMP_seek},
+    {"seek",        PMP_seek},
+    {"position",    PMP_position},
+    {"frameCount",  PMP_frameCount},
+    {"ready",       PMP_ready},
     {0, 0}
 };
 

@@ -50,6 +50,13 @@ extern int PMP_GOT_SUBS;
 extern int PMP_PAUSE;
 extern float PMP_FPS;
 extern int PMP_LAST_FRAME;
+// The frame the next pmp_play starts on (read once by pmp_play_open, then 0).
+extern int PMP_START_FRAME;
+// The number of the frame the output thread shows now.
+extern int PMP_SHOWN_FRAME;
+// 1 once the output thread has taken the first decoded frame of the video
+// (a start in the middle decodes from the key frame before it first).
+extern int PMP_FRAME_READY;
 
 #endif //GLOBALS_PMP
 
@@ -89,8 +96,8 @@ struct pmp_play_struct
 	unsigned int subtitle_fontcolor;
 	unsigned int subtitle_bordercolor;
 
-	int seek_request;
-	int seek_frame;
+	// The first frame shown (PMP_START_FRAME at the open).
+	unsigned int start_frame;
 	};
 
 

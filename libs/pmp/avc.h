@@ -69,7 +69,7 @@ char *avc_static_init();
 void avc_safe_constructor(struct avc_struct *p);
 void avc_close(struct avc_struct *p);
 char *avc_open(struct avc_struct *p, unsigned int maximum_frame_size, int bufwidth, int format);
-char *avc_get(struct avc_struct *p, void *source_buffer, int size, void *destination_buffer);
+char *avc_get(struct avc_struct *p, void *source_buffer, int size, void *destination_buffer, int *got_picture);
 
 #ifdef __cplusplus
 }

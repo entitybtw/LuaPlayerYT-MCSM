@@ -195,18 +195,21 @@ static void CopyAu2Me(struct avc_struct *p, void *source_buffer, int size)
 	}
 
 
-char *avc_get(struct avc_struct *p, void *source_buffer, int size, void *destination_buffer)
+// *got_picture: whether the decoder wrote a picture into destination_buffer
+// (it holds pictures back to reorder them, so a call may give none).
+char *avc_get(struct avc_struct *p, void *source_buffer, int size, void *destination_buffer, int *got_picture)
 	{
 	CopyAu2Me(p, source_buffer, size);
 
 	p->mpeg_au.iAuSize = size;
 
-	SceInt32 unused;
+	SceInt32 picture = 0;
 
-	if (sceMpegAvcDecode(&p->mpeg, &p->mpeg_au, p->mpeg_width, &destination_buffer, &unused) != 0)
+	if (sceMpegAvcDecode(&p->mpeg, &p->mpeg_au, p->mpeg_width, &destination_buffer, &picture) != 0)
 		{
 		return("avc_get: sceMpegAvcDecode failed");
 		}
+	*got_picture = picture != 0;
 
 
 	return(0);

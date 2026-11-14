@@ -56,7 +56,6 @@ int pmp_isplaying();
 void pmp_shutdown();
 
 int pmp_pause();
-void pmp_seek(int frame);
 
 #ifdef __cplusplus
 }

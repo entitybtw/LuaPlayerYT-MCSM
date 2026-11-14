@@ -42,6 +42,9 @@ int PMP_GOT_SUBS;
 int PMP_PAUSE;
 float PMP_FPS;
 int PMP_LAST_FRAME;
+int PMP_START_FRAME;
+int PMP_SHOWN_FRAME;
+int PMP_FRAME_READY;
 
 void pmp_play_safe_constructor(struct pmp_play_struct *p)
 {
@@ -64,8 +67,7 @@ void pmp_play_safe_constructor(struct pmp_play_struct *p)
 	p->finished = 0;
 	p->return_request = 0;
 	p->return_result  = 0;
-	p->seek_request = 0;
-	p->seek_frame = 0;
+	p->start_frame = 0;
 	pmp_decode_safe_constructor(&p->decoder);
 }
 
@@ -132,19 +134,33 @@ int pmp_decode_thread(SceSize input_length, void *input)
 	PMP_NUMBER_OF_FRAMES = p->decoder.reader.file.header.video.number_of_frames;
 	printf("starting decode thread.\n");
 	printf("number of frames: %i\n", p->decoder.reader.file.header.video.number_of_frames);
-	
+
+	// A start in the middle of the video. H.264 decodes only from a key frame,
+	// so the frames from the key frame before the start are decoded without
+	// their sound and never shown (no frame is shown until the output thread
+	// takes the first real one). The reader seeks by itself: it reads any
+	// packet of the index.
+	unsigned int start = p->start_frame;
+	if (start > 0 && start < p->decoder.reader.file.header.video.number_of_frames)
+	{
+		unsigned int k = start;
+		while (k > 0 && !(p->decoder.reader.file.packet_index[k] & 1))
+			k--;
+		for (; k < start && p->return_request == 0; k++)
+		{
+			char *result = pmp_decode_get((struct pmp_decode_struct *) &p->decoder, k, p->audio_stream, 0, p->volume_boost);
+			if (result != 0)
+			{
+				p->return_result  = result;
+				p->return_request = 1;
+				break;
+			}
+		}
+		PMP_CURRENT_FRAME = start;
+	}
+
 	while (p->return_request == 0 && PMP_CURRENT_FRAME != p->decoder.reader.file.header.video.number_of_frames)
 	{
-
-		if (p->seek_request) {
-            PMP_CURRENT_FRAME = p->seek_frame;
-            p->seek_request = 0;
-            
-            // Сбросить буферы декодера
-            p->decoder.current_video_frame = p->decoder.video_frame_buffers[0];
-            
-            p->seek_request = 0;
-        }
 
 		if (pmp_wait(p, p->semaphore_can_put, "pmp_play_start: sceKernelWaitSema failed on semaphore_can_put") == 0)
 		{
@@ -218,18 +234,17 @@ int pmp_output_thread(SceSize input_length, void *input)
 	printf("starting output thread.\n");
 	
 	unsigned int first_video_frame     = 1;
-	unsigned int current_buffer_number = 0;
+	// The decoder puts the frame n into the buffer n % number_of_frame_buffers,
+	// so a video that starts on a later frame is read from that buffer.
+	unsigned int current_buffer_number = p->start_frame % p->decoder.number_of_frame_buffers;
+	unsigned int shown_frame           = p->start_frame;
+	PMP_SHOWN_FRAME = shown_frame;
 	
 	while (p->return_request == 0 && (p->finished == 0 || current_buffer_number != p->decoder.last_buffer_number) )
 	{
 		pmp_input(p);
 
 		volatile struct pmp_decode_buffer_struct *current_buffer;
-
-		if (p->seek_request) {
-            // Сбросить текущий номер буфера при перемотке
-            current_buffer_number = 0;
-        }
 
 		if (!PMP_PAUSE)
 		{
@@ -276,6 +291,8 @@ int pmp_output_thread(SceSize input_length, void *input)
 		sceKernelDelayThread(1);
 		
 		p->decoder.current_video_frame = current_buffer->video_frame;
+		PMP_SHOWN_FRAME = shown_frame;
+		PMP_FRAME_READY = 1;
 
 		if (!PMP_PAUSE)
 		{
@@ -291,6 +308,7 @@ int pmp_output_thread(SceSize input_length, void *input)
 			//current_buffer->last_delay -= 500;
 		
 			current_buffer_number = (current_buffer_number + 1) % p->decoder.number_of_frame_buffers;
+			shown_frame++;
 		}
 
 		//sceKernelDelayThread(current_buffer->last_delay < 1 ? 1 : current_buffer->last_delay);
@@ -349,6 +367,11 @@ char *pmp_play_open(struct pmp_play_struct *p, char *s, int show, int format)
 	p->subtitle = 0;
 	p->subtitle_count = 0;
 	p->show = show;
+	p->start_frame = PMP_START_FRAME > 0 ? PMP_START_FRAME : 0;
+	PMP_START_FRAME = 0;
+	// Until the output thread runs, the position is the start.
+	PMP_SHOWN_FRAME = p->start_frame;
+	PMP_FRAME_READY = 0;
 
 	printf(">pmp_play_open( %p, \"%s\", %i, %i)\n", p, s, show, format);
 	char *result = pmp_decode_open(&p->decoder, s, format);
@@ -357,6 +380,12 @@ char *pmp_play_open(struct pmp_play_struct *p, char *s, int show, int format)
 		pmp_play_close(p);
 		return(result);
 	}
+	// A start in the middle shows no frame until the first real one: the
+	// buffers are new and black, and the frames decoded on the way to the
+	// start are not meant to be seen. The image of the caller keeps its
+	// picture meanwhile (the last frame for PMP.seek).
+	if (p->start_frame > 0)
+		p->decoder.current_video_frame = 0;
 
 	/*
 	//modify by cooleyes 2006/12/11

@@ -192,6 +192,7 @@ char *pmp_decode_open(struct pmp_decode_struct *p, char *s, int format)
 
 
 	p->current_buffer_number = 0;
+	p->last_picture_buffer = -1;
 	p->current_video_frame = p->video_frame_buffers[0];
 	
 	printf(">pmp_decode_open done.\n");
@@ -246,7 +247,8 @@ char *pmp_decode_get(struct pmp_decode_struct *p, unsigned int frame_number, uns
 		frame_buffer += (((272-p->video_frame_height)>>1)*p->video_buffer_width + ((480-p->video_frame_width)>>1))*(p->video_decode_format==3?4:2);
 	}
 
-	result = avc_get(&p->avc, packet.video_buffer, packet.video_length, frame_buffer);
+	int got_picture = 0;
+	result = avc_get(&p->avc, packet.video_buffer, packet.video_length, frame_buffer, &got_picture);
 	if (result != 0)
 		{
 		printf("pmp_decode_get: avc_get failed!\n");
@@ -257,7 +259,18 @@ char *pmp_decode_get(struct pmp_decode_struct *p, unsigned int frame_number, uns
 	p->output_frame_buffers[p->current_buffer_number].number_of_audio_frames = packet.number_of_audio_frames;
 	p->output_frame_buffers[p->current_buffer_number].first_delay            = packet.first_delay;
 	p->output_frame_buffers[p->current_buffer_number].last_delay             = packet.last_delay;
-	p->output_frame_buffers[p->current_buffer_number].video_frame            = p->video_frame_buffers[p->current_buffer_number];
+	// A frame without a picture shows the last picture again: its own buffer
+	// still holds an old frame, or nothing at all after a start in the middle
+	// of the video (one black frame).
+	if (got_picture || p->last_picture_buffer < 0)
+		{
+		if (got_picture) p->last_picture_buffer = p->current_buffer_number;
+		p->output_frame_buffers[p->current_buffer_number].video_frame = p->video_frame_buffers[p->current_buffer_number];
+		}
+	else
+		{
+		p->output_frame_buffers[p->current_buffer_number].video_frame = p->video_frame_buffers[p->last_picture_buffer];
+		}
 
 
 
