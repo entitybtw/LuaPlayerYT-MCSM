@@ -167,17 +167,20 @@ int pmp_decode_thread(SceSize input_length, void *input)
 			break;
 		}
 
-		if (!PMP_PAUSE)
+		// No check of the pause here: every slot the output thread gives back
+		// is filled with the next frame, and on a pause the output thread
+		// gives none back, so the decoder stops by itself once the ring is
+		// full. (It used to hand out empty slots during a pause: the output
+		// thread then read a buffer the decoder was still writing, green
+		// blocks on the screen, and old sound after the pause.)
+		p->decoder.last_buffer_number = p->decoder.current_buffer_number;
+
+		char *result = pmp_decode_get((struct pmp_decode_struct *) &p->decoder, PMP_CURRENT_FRAME, p->audio_stream, 1, p->volume_boost/*, p->subtitle, p->subtitle_format*/);
+		if (result != 0)
 		{
-			p->decoder.last_buffer_number = p->decoder.current_buffer_number;
-	
-			char *result = pmp_decode_get((struct pmp_decode_struct *) &p->decoder, PMP_CURRENT_FRAME, p->audio_stream, 1, p->volume_boost/*, p->subtitle, p->subtitle_format*/);
-			if (result != 0)
-			{
-				p->return_result  = result;
-				p->return_request = 1;
-				break;
-			}
+			p->return_result  = result;
+			p->return_request = 1;
+			break;
 		}
 		/* // Uncomment and run decode_thread only for a speed benchmark
 		p->decoder.current_video_frame = p->decoder.output_frame_buffers[p->decoder.last_buffer_number].video_frame;
@@ -193,8 +196,7 @@ int pmp_decode_thread(SceSize input_length, void *input)
 			break;
 		}
 		
-		if (!PMP_PAUSE)
-			PMP_CURRENT_FRAME++;
+		PMP_CURRENT_FRAME++;
 		
 	}
 	
@@ -244,12 +246,18 @@ int pmp_output_thread(SceSize input_length, void *input)
 	{
 		pmp_input(p);
 
-		volatile struct pmp_decode_buffer_struct *current_buffer;
-
-		if (!PMP_PAUSE)
+		// A pause holds the shown frame and touches neither semaphore: the
+		// frames decoded ahead stay in the ring, in order, and play on with
+		// their own sound when the pause ends. The thread sleeps meanwhile,
+		// so the pause menu gets the CPU.
+		if (PMP_PAUSE)
 		{
-			current_buffer = &p->decoder.output_frame_buffers[current_buffer_number];
+			sceKernelDelayThread(10000);
+			continue;
 		}
+
+		volatile struct pmp_decode_buffer_struct *current_buffer =
+			&p->decoder.output_frame_buffers[current_buffer_number];
 
 		// The wait for the next decoded frame. When the decoder has finished
 		// and no frame is left, the video is over: without this check the
@@ -294,22 +302,16 @@ int pmp_output_thread(SceSize input_length, void *input)
 		PMP_SHOWN_FRAME = shown_frame;
 		PMP_FRAME_READY = 1;
 
-		if (!PMP_PAUSE)
-		{
-			
-			sceAudioOutputBlocking(p->audio_reserved, PMP_AUDIO_VOLUME, current_buffer->audio_frame);
+		sceAudioOutputBlocking(p->audio_reserved, PMP_AUDIO_VOLUME, current_buffer->audio_frame);
 
-			int i = 1;
-			for (; i < current_buffer->number_of_audio_frames; i++)
-			{
-				sceAudioOutputBlocking(p->audio_reserved, PMP_AUDIO_VOLUME, current_buffer->audio_frame + p->decoder.audio_frame_size * i);
-			}
-		
-			//current_buffer->last_delay -= 500;
-		
-			current_buffer_number = (current_buffer_number + 1) % p->decoder.number_of_frame_buffers;
-			shown_frame++;
+		int i = 1;
+		for (; i < current_buffer->number_of_audio_frames; i++)
+		{
+			sceAudioOutputBlocking(p->audio_reserved, PMP_AUDIO_VOLUME, current_buffer->audio_frame + p->decoder.audio_frame_size * i);
 		}
+
+		current_buffer_number = (current_buffer_number + 1) % p->decoder.number_of_frame_buffers;
+		shown_frame++;
 
 		//sceKernelDelayThread(current_buffer->last_delay < 1 ? 1 : current_buffer->last_delay);
 		sceKernelDelayThread(1);
