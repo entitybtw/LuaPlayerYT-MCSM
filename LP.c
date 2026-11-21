@@ -230,7 +230,8 @@ static intraFont *loadErrorFont(const char *text, ErrorLine *lines, int *count, 
 
     *ownFont = TRUE;
     for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
-        intraFont *font = intraFontLoadTTF("assets/minecraft.ttf", INTRAFONT_STRING_UTF8, sizes[i]);
+        // 0: keep the auto-hinter, the error screen shows minecraft.ttf as the game does
+        intraFont *font = intraFontLoadTTF("assets/minecraft.ttf", INTRAFONT_STRING_UTF8, sizes[i], 0);
         if (!font) break;
 
         intraFontSetStyle(font, 1.f, G2D_RGBA(0, 0, 0, 255), 0, 0.f, 0);

@@ -168,17 +168,19 @@ static void printLoadedItems(void **array, int count, int capacity, const char *
 
 static int INTRAFONT_load(lua_State *L) {
     int args = lua_gettop(L);
-    if (args != 1 && args != 2)
-        return luaL_error(L, "intraFont.load(path, [size]) takes 1 or 2 argument");
+    if (args < 1 || args > 3)
+        return luaL_error(L, "intraFont.load(path, [size], [nohint]) takes 1 to 3 arguments");
 
     const char *path = luaL_checkstring(L, 1);
     float size = luaL_optnumber(L, 2, 11.f);
+    // nohint: keep the fractional coverage of the outlines (no auto-hinter)
+    int nohint = lua_toboolean(L, 3);
     intraFont *font;
 
     size_t len = strlen(path);
 
     if (strcasecmp(path + len - 4, ".ttf") == 0 || strcasecmp(path + len - 4, ".otf") == 0) {
-        font = intraFontLoadTTF(path, INTRAFONT_STRING_UTF8, size);
+        font = intraFontLoadTTF(path, INTRAFONT_STRING_UTF8, size, nohint);
     } else if (strcasecmp(path + len - 4, ".pgf") == 0) {
         font = intraFontLoad(path, INTRAFONT_CACHE_ALL | INTRAFONT_STRING_UTF8);
     }

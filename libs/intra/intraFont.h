@@ -209,7 +209,11 @@ extern "C" {
      */
     intraFont *intraFontLoad(const char *filename, unsigned int options);
 
-    intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float size);
+    // no_autohint: rasterise the glyphs without the FreeType auto-hinter. A font
+    // whose shapes must keep a fractional coverage of a pixel (a pixel-art font
+    // on the grid, where a cell is a part of a pixel) needs it: the auto-hinter
+    // snaps the edges of every outline to the grid and the coverage is lost.
+    intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float size, int no_autohint);
 
     /**
      * Free the specified font.

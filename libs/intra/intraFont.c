@@ -1506,7 +1506,7 @@ int intraFontTextInkTop(intraFont *font) {
     return top;
 }
 
-intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float size) {
+intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float size, int no_autohint) {
     FT_Library library;
     FT_Face face;
     intraFont *font = NULL;
@@ -1651,7 +1651,11 @@ intraFont *intraFontLoadTTF(const char *filename, unsigned int options, float si
     // Load glyphs with proper mapping
     int loaded_chars = 0;
     int mapped_chars = 0; // Отдельный счетчик для маппинга
-    FT_Int32 load_flags = FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL;
+    // A font that is drawn on the pixel grid of the screen may encode a part of a
+    // pixel in an outline (a cell of the grid narrower than a pixel); the
+    // auto-hinter would snap it away, so such a font asks for no hinting.
+    FT_Int32 load_flags = FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL |
+                          (no_autohint ? FT_LOAD_NO_AUTOHINT : 0);
 
     // Создаем маппинг: char_code -> index в glyph массиве
     for (int range = 0; range < font->charmap_compr_len && mapped_chars < font->n_chars; range++) {
