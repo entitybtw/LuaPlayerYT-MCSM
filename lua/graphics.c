@@ -1395,6 +1395,9 @@ static int LPYTVideoPlay = 0;
 static int PMP_LOOP = 0;
 // The video is over and its last frame has been handed out once more.
 static int PMP_LAST_FRAME_DONE = 0;
+// The serial of the frame last copied out of the decoder's buffer
+// (PMP_FRAME_SERIAL of the player counts the frames it makes current).
+static int PMP_FRAME_COPIED = 0;
 
 static void freeLastFrame(void) {
     if (PMP_KEPT_FRAME) removeLoadedImage(PMP_KEPT_FRAME);
@@ -1414,29 +1417,39 @@ static void keepCurrentFrame(void) {
 }
 
 static void getFrame(g2dImage *tex) {
+    int serial = PMP_FRAME_SERIAL;
     int orig_width, orig_height;
     void *frame_data = pmp_get_frame(NULL, &orig_width, &orig_height, NULL);
 
-    if (!frame_data)
-        return;
+    // A frame is copied once: a second PMP.getFrame for the same frame of the
+    // video (the caller may come back before the next one is shown) would read
+    // the decoder's buffer again for nothing. The copy is over before the
+    // player learns it: the buffer of the frame on the screen is the one the
+    // decoder writes k frames later, and it must not do that while this runs.
+    if (frame_data && PMP_FRAME_COPIED != serial) {
+        uint32_t *src = (uint32_t *)frame_data;
+        uint16_t *dst = (uint16_t *)tex->data;
 
-    uint32_t *src = (uint32_t *)frame_data;
-    uint16_t *dst = (uint16_t *)tex->data;
-
-    int x, y;
-    for (y = 0; y < 272; y++) {
-        uint32_t *row = src + (int)((y * orig_height) * INVERSE_272) * 512;
-        uint16_t *out = dst + y * tex->tw;
-        for (x = 0; x < 480; x++) {
-            uint32_t c = row[orig_width == 480 ? x : (int)((x * orig_width) * INVERSE_480)];
-            // The texture is 16-bit: 277 KB instead of 1 MB of memory.
-            out[x] = ((G2D_GET_B(c) >> 3) << 11) | ((G2D_GET_G(c) >> 2) << 5) | (G2D_GET_R(c) >> 3);
+        int x, y;
+        for (y = 0; y < 272; y++) {
+            uint32_t *row = src + (int)((y * orig_height) * INVERSE_272) * 512;
+            uint16_t *out = dst + y * tex->tw;
+            for (x = 0; x < 480; x++) {
+                uint32_t c = row[orig_width == 480 ? x : (int)((x * orig_width) * INVERSE_480)];
+                // The texture is 16-bit: 277 KB instead of 1 MB of memory.
+                out[x] = ((G2D_GET_B(c) >> 3) << 11) | ((G2D_GET_G(c) >> 2) << 5) | (G2D_GET_R(c) >> 3);
+            }
         }
+
+        // sceKernelDcacheWritebackInvalidateAll();
+        sceKernelDcacheWritebackAll();
+        //sceKernelDcacheWritebackRange(tex->data, tex->tw * tex->th * sizeof(uint32_t));
+        PMP_FRAME_COPIED = serial;
     }
 
-    // sceKernelDcacheWritebackInvalidateAll();
-    sceKernelDcacheWritebackAll();
-    //sceKernelDcacheWritebackRange(tex->data, tex->tw * tex->th * sizeof(uint32_t));
+    // The caller has the frame: its buffer may go back to the decoder
+    // (the output thread waits for this before it gives the credit back).
+    PMP_FRAME_TAKEN = serial;
 }
 
 static float convertTimecodeToSeconds(const char *timecode) {
@@ -1916,6 +1929,9 @@ int PMP_init(lua_State *L) {
     PMP_PAUSE = 0;
     PMP_LAST_FRAME = 0;
     PMP_CURRENT_FRAME = 0;
+    PMP_FRAME_SERIAL = 0;
+    PMP_FRAME_TAKEN = 0;
+    PMP_FRAME_COPIED = 0;
 
     //watermarkk = g2dTexLoad(NULL, watermark, size_watermark, G2D_VOID);
 

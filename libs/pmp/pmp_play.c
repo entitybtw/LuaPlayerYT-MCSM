@@ -45,6 +45,8 @@ int PMP_LAST_FRAME;
 int PMP_START_FRAME;
 int PMP_SHOWN_FRAME;
 int PMP_FRAME_READY;
+int PMP_FRAME_SERIAL;
+int PMP_FRAME_TAKEN;
 
 void pmp_play_safe_constructor(struct pmp_play_struct *p)
 {
@@ -301,6 +303,9 @@ int pmp_output_thread(SceSize input_length, void *input)
 		p->decoder.current_video_frame = current_buffer->video_frame;
 		PMP_SHOWN_FRAME = shown_frame;
 		PMP_FRAME_READY = 1;
+		// The frame the caller may copy out now. Its number tells the caller's
+		// copy apart from the one of the frame before.
+		PMP_FRAME_SERIAL++;
 
 		sceAudioOutputBlocking(p->audio_reserved, PMP_AUDIO_VOLUME, current_buffer->audio_frame);
 
@@ -322,6 +327,19 @@ int pmp_output_thread(SceSize input_length, void *input)
 		}
 		else
 		{
+			// No buffer of the ring goes back to the decoder before the caller
+			// has copied the frame out: the decoder writes the frame k ahead
+			// into the very buffer of the frame on the screen, so a credit
+			// given here while the copy is still running tore the copy (green
+			// blocks, a "frozen" frame for a moment). The pause made it easy to
+			// hit: on resume the output thread runs off several frames at once
+			// (the audio channel takes them without waiting) while the caller
+			// copies the first one.
+			while (PMP_FRAME_TAKEN != PMP_FRAME_SERIAL && p->return_request == 0)
+			{
+				sceKernelDelayThread(PMP_PAUSE ? 10000 : 1000);
+			}
+
 			if (sceKernelSignalSema(p->semaphore_can_put, 1) < 0)
 			{
 				p->return_result  = "pmp_output_thread: sceKernelSignalSema failed on semaphore_can_put";

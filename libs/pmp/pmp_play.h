@@ -57,6 +57,13 @@ extern int PMP_SHOWN_FRAME;
 // 1 once the output thread has taken the first decoded frame of the video
 // (a start in the middle decodes from the key frame before it first).
 extern int PMP_FRAME_READY;
+// The number of the frame the output thread has made current (it grows with
+// every frame, also across videos).
+extern int PMP_FRAME_SERIAL;
+// The serial of the frame the caller has copied out of the decoder's buffer
+// (lua/graphics.c, getFrame). The output thread hands the buffer of a frame
+// back to the decoder only after this says the copy is done.
+extern int PMP_FRAME_TAKEN;
 
 #endif //GLOBALS_PMP
 
